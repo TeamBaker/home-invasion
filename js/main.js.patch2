@@ -1,0 +1,191 @@
+}
+
+// ───────────────────────────── flashlight mode ─────────────────────────────
+function createFlashlight() {
+  // Flashlight model (simple cylinder + cone)
+  const body = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.02, 0.03, 0.15, 8),
+    new THREE.MeshBasicMaterial({ color: 0x333333 })
+  );
+  body.position.y = 0.075;
+  
+  const head = new THREE.Mesh(
+    new THREE.ConeGeometry(0.04, 0.05, 8),
+    new THREE.MeshBasicMaterial({ color: 0x666666 })
+  );
+  head.position.y = 0.175;
+  head.rotation.x = Math.PI;
+  
+  flashlightModel = new THREE.Group();
+  flashlightModel.add(body, head);
+  flashlightModel.position.set(0.1, -0.1, -0.2);
+  flashlightModel.visible = false;
+  
+  // Flashlight cone (light beam)
+  const coneGeom = new THREE.ConeGeometry(0.5, 10, 16, 1, true);
+  const positions = coneGeom.attributes.position;
+  const colors = [];
+  
+  for (let i = 0; i < positions.count; i++) {
+    const y = positions.getY(i);
+    const intensity = 1 - Math.max(0, y / 10); // Fade from tip to base
+    colors.push(intensity, intensity, intensity);
+  }
+  coneGeom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  
+  flashlightCone = new THREE.Mesh(
+    coneGeom,
+    new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.8,
+      blending: THREE.CustomBlending,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      depthTest: true,
+      depthWrite: false,
+      side: THREE.BackSide
+    })
+  );
+  flashlightCone.position.y = 0.18;
+  flashlightCone.rotation.x = -Math.PI / 2;
+  flashlightCone.visible = false;
+  flashlightCone.renderOrder = 2100;
+  
+  // Darkness overlay
+  const darkGeom = new THREE.PlaneGeometry(20, 20);
+  darknessOverlay = new THREE.Mesh(
+    darkGeom,
+    new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      transparent: true,
+      opacity: 1.0 - (roomBrightness / 100),
+      depthTest: false,
+      depthWrite: false
+    })
+  );
+  darknessOverlay.position.set(0, 0, -5);
+  darknessOverlay.visible = false;
+  darknessOverlay.renderOrder = 2000;
+  camera.add(darknessOverlay);
+  
+  flashlightModel.add(flashlightCone);
+  scene.add(flashlightModel);
+}
+
+function createSettingsPanel() {
+  const cv = document.createElement('canvas');
+  cv.width = 800; cv.height = 400;
+  const g = cv.getContext('2d');
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.7, 0.35),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false }),
+  );
+  mesh.position.set(0, 0.1, -1);
+  mesh.renderOrder = 1001;
+  mesh.visible = false;
+  camera.add(mesh);
+  
+  function renderPanel() {
+    g.clearRect(0, 0, 800, 400);
+    g.fillStyle = 'rgba(0,0,0,0.85)';
+    g.fillRect(0, 0, 800, 400);
+    g.strokeStyle = '#8a0000'; g.lineWidth = 4;
+    g.strokeRect(8, 8, 784, 384);
+    
+    g.textAlign = 'center';
+    g.fillStyle = '#d40000';
+    g.font = 'bold 60px Georgia, serif';
+    g.fillText('SETTINGS', 400, 60);
+    
+    g.textAlign = 'left';
+    g.fillStyle = settingsCursor === 0 ? '#ff6a00' : '#eee';
+    g.font = '36px Georgia, serif';
+    g.fillText('FLASHLIGHT MODE: ' + (flashlightMode ? 'ON' : 'OFF'), 100, 150);
+    
+    g.fillStyle = settingsCursor === 1 ? '#ff6a00' : '#eee';
+    g.fillText('ROOM BRIGHTNESS: ' + roomBrightness + '%', 100, 220);
+    
+    g.textAlign = 'center';
+    g.fillStyle = '#999';
+    g.font = 'italic 24px Georgia, serif';
+    g.fillText('Use stick/arrows to navigate, trigger/A to toggle', 400, 320);
+    g.fillText('B or stick press to close', 400, 360);
+    
+    tex.needsUpdate = true;
+  }
+  
+  settingsPanel = {
+    mesh,
+    render: renderPanel,
+    show() { 
+      mesh.visible = true;
+      renderPanel();
+    },
+    hide() { mesh.visible = false; },
+    updateBrightness() {
+      localStorage.setItem('mrh-room-brightness', roomBrightness);
+      if (darknessOverlay) {
+        darknessOverlay.material.opacity = 1.0 - (roomBrightness / 100);
+      }
+      renderPanel();
+    }
+  };
+}
+
+function toggleFlashlightMode() {
+  flashlightMode = !flashlightMode;
+  
+  if (flashlightMode) {
+    if (!flashlightModel) createFlashlight();
+    flashlightModel.visible = true;
+    darknessOverlay.visible = true;
+  } else {
+    if (flashlightModel) flashlightModel.visible = false;
+    if (darknessOverlay) darknessOverlay.visible = false;
+  }
+  
+  if (settingsPanel) settingsPanel.render();
+}
+
+function toggleSettingsPanel() {
+  settingsPanelOpen = !settingsPanelOpen;
+  
+  if (settingsPanelOpen) {
+    if (!settingsPanel) createSettingsPanel();
+    settingsPanel.show();
+  } else {
+    if (settingsPanel) settingsPanel.hide();
+  }
+}
+
+function updateFlashlightPosition() {
+  if (!flashlightModel || !flashlightMode) return;
+  
+  const session = renderer.xr.getSession();
+  if (session) {
+    // XR mode: attach to right controller
+    for (const src of session.inputSources) {
+      if (src.gamepad && src.handedness === 'right') {
+        const grip = grips.get(src.handedness);
+        if (grip) {
+          grip.getWorldPosition(flashlightModel.position);
+          grip.getWorldQuaternion(flashlightModel.quaternion);
+          break;
+        }
+      }
+    }
+  } else {
+    // Desktop mode: attach to camera direction
+    flashlightModel.position.copy(camera.position);
+    camera.getWorldDirection(_v);
+    _v.multiplyScalar(0.5);
+    flashlightModel.position.add(_v);
+    flashlightModel.quaternion.copy(camera.quaternion);
+  }
+}
+
+// ───────────────────────────── main loop ─────────────────────────────

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>HOME INVASION — Mixed Reality Horror</title>
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+  </script>
+</head>
+<body>
+  <div id="overlay">
+    <h1>HOME INVASION</h1>
+    <p class="tag">Something is in your house. It is walking toward you.</p>
+
+    <button id="start" disabled>CHECKING HEADSET…</button>
+    <p id="mode-info"></p>
+
+    <ul class="help">
+      <li><b>Left stick</b> — slide</li>
+      <li><b>Right stick</b> — snap turn</li>
+      <li><b>Your feet</b> — walk away. Physically. It still follows.</li>
+      <li><b>Trigger / pinch</b> — retry after death</li>
+      <li class="desk">Desktop preview: <b>WASD</b> move · <b>Q/E</b> snap · mouse look</li>
+      <li><b>X</b> (left) / <b>G</b> (desktop) — room diagnostics</li>
+      <li class="desk">Desktop has no room by default — add <b>?simroom</b> to the URL for a simulated one</li>
+    </ul>
+    <p id="best"></p>
+  </div>
+
+  <script type="module" src="js/main.js?v=shadow1"></script>
+</body>
+</html>

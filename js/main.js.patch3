@@ -1,0 +1,45 @@
+function readInput() {
+  input.moveX = input.moveY = input.turnX = 0;
+  const session = renderer.xr.getSession();
+  if (session) {
+    for (const src of session.inputSources) {
+      const gp = src.gamepad;
+      // Left X button (xr-standard index 4) toggles the room overlay.
+      if (gp && src.handedness === 'left') {
+        const down = !!gp.buttons[4]?.pressed;
+        if (down && !debugBtnWasDown) toggleDebug();
+        debugBtnWasDown = down;
+      }
+      // Right stick press (xr-standard index 3) toggles settings panel
+      if (gp && src.handedness === 'right') {
+        const down = !!gp.buttons[3]?.pressed;
+        if (down && !settingsBtnWasDown) toggleSettingsPanel();
+        settingsBtnWasDown = down;
+        rightStickPressed = down;
+      }
+      if (!gp || gp.axes.length < 2) continue;  // tracked hands have no stick
+      // xr-standard mapping: thumbstick is axes[2], axes[3]
+      const x = gp.axes.length >= 4 ? gp.axes[2] : gp.axes[0];
+      const y = gp.axes.length >= 4 ? gp.axes[3] : gp.axes[1];
+      if (src.handedness === 'left') { input.moveX = x; input.moveY = y; }
+      else if (src.handedness === 'right') { 
+        // Suppress turning when settings panel is open
+        input.turnX = settingsPanelOpen ? 0 : x; 
+      }
+    }
+  } else {
+    input.moveX = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+    input.moveY = (keys.has('KeyS') ? 1 : 0) - (keys.has('KeyW') ? 1 : 0);
+    
+    // Desktop: F key toggles flashlight, Tab key toggles settings
+    if (keys.has('KeyF') && !settingsPanelOpen) {
+      keys.delete('KeyF');
+      toggleFlashlightMode();
+    }
+    if (keys.has('Tab')) {
+      keys.delete('Tab');
+      toggleSettingsPanel();
+    }
+  }
+  return input;
+}

@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Flashlight Mode Test</title>
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+  </script>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+    canvas { display: block; }
+    .info { 
+      position: absolute; 
+      top: 10px; 
+      left: 10px; 
+      color: white; 
+      font-family: monospace; 
+      background: rgba(0,0,0,0.7);
+      padding: 10px;
+      border-radius: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div class="info">
+    <h3>Flashlight Mode Test</h3>
+    <p>Press F to toggle flashlight mode</p>
+    <p>Flashlight Mode: <span id="status">OFF</span></p>
+  </div>
+  
+  <script type="module">
+    import * as THREE from 'three';
+    
+    // Initialize renderer, scene, camera
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x000000, 0);
+    document.body.appendChild(renderer.domElement);
+    
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 1.6, 5);
+    camera.lookAt(0, 1.6, 0);
+    
+    // Add some test objects
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(20, 20),
+      new THREE.MeshStandardMaterial({ color: 0x444444 })
+    );
+    floor.rotation.x = -Math.PI / 2;
+    scene.add(floor);
+    
+    const cube = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshStandardMaterial({ color: 0xff0000 })
+    );
+    cube.position.set(2, 0.5, 0);
+    scene.add(cube);
+    
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(0.5, 16, 16),
+      new THREE.MeshStandardMaterial({ color: 0x00ff00 })
+    );
+    sphere.position.set(-2, 0.5, 0);
+    scene.add(sphere);
+    
+    // Add some lights
+    const ambientLight = new THREE.AmbientLight(0x404040);
+    scene.add(ambientLight);
+    
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+    directionalLight.position.set(1, 1, 1);
+    scene.add(directionalLight);
+    
+    // Flashlight configuration
+    const FLASHLIGHT_CFG = {
+      coneLength: 12.0,
+      coneAngle: THREE.MathUtils.degToRad(35),
+      coneSegments: 16,
+      flickerIntensity: 0.15,
+      flickerSpeed: 3.0,
+      darknessOpacity: 0.92
+    };
+    
+    // Flashlight assets
+    let flashlightMode = false;
+    let flashlightCone = null;
+    let flashlightModel = null;
+    let darknessOverlay = null;
+    
+    function createFlashlightAssets() {
+      // Flashlight model
+      const bodyGeometry = new THREE.CylinderGeometry(0.03, 0.03, 0.2, 8);
+      const headGeometry = new THREE.ConeGeometry(0.05, 0.1, 8);
+      
+      const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.8 });
+      const headMaterial = new THREE.MeshStandardMaterial({ color: 0x666666, metalness: 0.9 });
+      
+      flashlightModel = new THREE.Group();
+      
+      const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+      body.position.y = 0.1;
+      
+      const head = new THREE.Mesh(headGeometry, headMaterial);
+      head.position.y = 0.25;
+      head.rotation.x = Math.PI / 2;
+      
+      flashlightModel.add(body);
+      flashlightModel.add(head);
+      flashlightModel.visible = false;
+      scene.add(flashlightModel);
+      
+      // Flashlight cone
+      const coneGeometry = new THREE.ConeGeometry(
+        Math.tan(FLASHLIGHT_CFG.coneAngle) * FLASHLIGHT_CFG.coneLength,
+        FLASHLIGHT_CFG.coneLength,
+        FLASHLIGHT_CFG.coneSegments
+      );
+      coneGeometry.translate(0, -FLASHLIGHT_CFG.coneLength / 2, 0);
+      coneGeometry.rotateX(Math.PI / 2);
+      
+      const coneMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          time: { value: 0 },
+          intensity: { value: 1.0 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          varying vec3 vPosition;
+          void main() {
+            vUv = uv;
+            vPosition = position;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float time;
+          uniform float intensity;
+          varying vec2 vUv;
+          varying vec3 vPosition;
+          
+          void main() {
+            // Radial falloff from center
+            float dist = length(vPosition.xy);
+            float maxRadius = ${Math.tan(FLASHLIGHT_CFG.coneAngle) * FLASHLIGHT_CFG.coneLength};
+            float falloff = 1.0 - smoothstep(0.0, maxRadius, dist);
+            
+            // Flicker effect
+            float flicker = 0.8 + 0.2 * sin(time * 6.0) + 0.1 * sin(time * 12.3);
+            
+            // Soft edge
+            float edge = smoothstep(0.7, 1.0, vUv.y);
+            
+            float alpha = falloff * (1.0 - edge) * intensity * flicker;
+            gl_FragColor = vec4(1.0, 1.0, 0.9, alpha);
+          }
+        `,
+        transparent: true,
+        depthTest: true,
+        depthWrite: false,
+        blending: THREE.CustomBlending,
+        blendSrc: THREE.SrcAlphaFactor,
+        blendDst: THREE.OneMinusSrcAlphaFactor,
+        blendEquation: THREE.AddEquation
+      });
+      
+      flashlightCone = new THREE.Mesh(coneGeometry, coneMaterial);
+      flashlightCone.visible = false;
+      flashlightCone.renderOrder = 2100;
+      scene.add(flashlightCone);
+      
+      // Darkness overlay
+      const overlayGeometry = new THREE.PlaneGeometry(2, 2);
+      const overlayMaterial = new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        opacity: FLASHLIGHT_CFG.darknessOpacity,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false
+      });
+      
+      darknessOverlay = new THREE.Mesh(overlayGeometry, overlayMaterial);
+      darknessOverlay.renderOrder = 2000;
+      darknessOverlay.visible = false;
+      scene.add(darknessOverlay);
+    }
+    
+    function toggleFlashlightMode() {
+      flashlightMode = !flashlightMode;
+      
+      if (flashlightCone) flashlightCone.visible = flashlightMode;
+      if (flashlightModel) flashlightModel.visible = flashlightMode;
+      if (darknessOverlay) darknessOverlay.visible = flashlightMode;
+      
+      document.getElementById('status').textContent = flashlightMode ? 'ON' : 'OFF';
+      console.log('Flashlight mode:', flashlightMode ? 'ON' : 'OFF');
+    }
+    
+    function updateFlashlightPosition() {
+      if (flashlightMode && flashlightCone && flashlightModel) {
+        flashlightModel.position.copy(camera.position);
+        flashlightModel.rotation.copy(camera.rotation);
+        flashlightModel.translateZ(-0.3);
+        flashlightModel.translateY(-0.2);
+        
+        flashlightCone.position.copy(flashlightModel.position);
+        flashlightCone.rotation.copy(flashlightModel.rotation);
+        flashlightCone.translateZ(0.1);
+      }
+    }
+    
+    // Create flashlight assets
+    createFlashlightAssets();
+    
+    // Animation loop
+    function animate() {
+      requestAnimationFrame(animate);
+      
+      // Update flashlight cone time uniform for flicker
+      if (flashlightCone && flashlightCone.material) {
+        flashlightCone.material.uniforms.time.value = performance.now() / 1000 * FLASHLIGHT_CFG.flickerSpeed;
+      }
+      
+      // Update flashlight position
+      updateFlashlightPosition();
+      
+      renderer.render(scene, camera);
+    }
+    
+    // Keyboard control
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'f' || e.key === 'F') {
+        toggleFlashlightMode();
+      }
+    });
+    
+    // Start animation
+    animate();
+    
+    console.log('Flashlight test ready. Press F to toggle flashlight mode.');
+  </script>
+</body>
+</html>

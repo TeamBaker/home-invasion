@@ -1,0 +1,15 @@
+const scareAnchor = new THREE.Vector3();
+
+// Flashlight mode globals
+let flashlightMode = false;
+let settingsPanelOpen = false;
+let flashlightCone = null;
+let flashlightModel = null;
+let darknessOverlay = null;
+let settingsPanel = null;
+let roomBrightness = +(localStorage.getItem('mrh-room-brightness') || 0);
+let settingsCursor = 0;
+let rightStickPressed = false;
+let settingsBtnWasDown = false;
+
+// Room-space helpers. The monster object lives in world space (scene child) but all

@@ -1,0 +1,35 @@
+function updateFlashlightPosition() {
+  if (!flashlightModel || !flashlightMode) return;
+  
+  const session = renderer.xr.getSession();
+  if (session) {
+    // XR mode: attach to right controller
+    for (const src of session.inputSources) {
+      if (src.gamepad && src.handedness === 'right') {
+        const grip = grips.get(src.handedness);
+        if (grip) {
+          grip.getWorldPosition(flashlightModel.position);
+          grip.getWorldQuaternion(flashlightModel.quaternion);
+          break;
+        }
+      }
+    }
+  } else {
+    // Desktop mode: attach to camera direction
+    flashlightModel.position.copy(camera.position);
+    camera.getWorldDirection(_v);
+    _v.multiplyScalar(0.5);
+    flashlightModel.position.add(_v);
+    flashlightModel.quaternion.copy(camera.quaternion);
+  }
+  
+  // Flashlight flicker effect
+  if (flashlightCone) {
+    flashlightFlickerTime += clock.getDelta();
+    const noise = (Math.sin(flashlightFlickerTime * 8) + 
+                  Math.sin(flashlightFlickerTime * 13.7) + 
+                  Math.sin(flashlightFlickerTime * 23.2)) / 3;
+    const flicker = 0.8 + 0.2 * noise;
+    flashlightCone.material.opacity = flicker * 0.8;
+  }
+}

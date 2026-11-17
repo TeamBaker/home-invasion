@@ -1,0 +1,85 @@
+  const inp = readInput();
+
+  // Update flashlight position and settings panel navigation
+  updateFlashlightPosition();
+  
+  if (settingsPanelOpen) {
+    // Handle settings navigation
+    const session = renderer.xr.getSession();
+    let navY = 0;
+    let navX = 0;
+    let action = false;
+    
+    if (session) {
+      // XR navigation with right controller
+      for (const src of session.inputSources) {
+        if (src.gamepad && src.handedness === 'right') {
+          const gp = src.gamepad;
+          navY = gp.axes.length >= 4 ? gp.axes[3] : gp.axes[1];
+          navX = gp.axes.length >= 4 ? gp.axes[2] : gp.axes[0];
+          action = !!gp.buttons[0]?.pressed || !!gp.buttons[4]?.pressed;
+          break;
+        }
+      }
+    } else {
+      // Desktop navigation with arrow keys
+      navY = (keys.has('ArrowDown') ? 1 : 0) - (keys.has('ArrowUp') ? 1 : 0);
+      navX = (keys.has('ArrowRight') ? 1 : 0) - (keys.has('ArrowLeft') ? 1 : 0);
+      action = keys.has('Enter') || keys.has('Space');
+      
+      // Clear the action keys to prevent repeated triggers
+      if (action) {
+        keys.delete('Enter');
+        keys.delete('Space');
+      }
+    }
+    
+    // Navigation logic
+    if (Math.abs(navY) > 0.5 && !rightStickPressed) {
+      settingsCursor = (settingsCursor + (navY > 0 ? 1 : -1) + 2) % 2;
+      if (settingsPanel) settingsPanel.render();
+      rightStickPressed = true;
+    } else if (Math.abs(navY) < 0.2) {
+      rightStickPressed = false;
+    }
+    
+    // Brightness adjustment
+    if (settingsCursor === 1 && Math.abs(navX) > 0.5) {
+      roomBrightness = THREE.MathUtils.clamp(roomBrightness + (navX > 0 ? 5 : -5), 0, 100);
+      if (settingsPanel) settingsPanel.updateBrightness();
+    }
+    
+    // Action (toggle selected item)
+    if (action) {
+      if (settingsCursor === 0) {
+        toggleFlashlightMode();
+      }
+    }
+    
+    // Close settings with B button or stick press
+    const closeBtn = session ? 
+      (() => {
+        for (const src of session.inputSources) {
+          if (src.gamepad && src.handedness === 'right') {
+            return !!src.gamepad.buttons[5]?.pressed;
+          }
+        }
+        return false;
+      })() : keys.has('Escape');
+    
+    if (closeBtn) {
+      if (session) {
+        // Clear the B button state
+        for (const src of session.inputSources) {
+          if (src.gamepad && src.handedness === 'right') {
+            src.gamepad.buttons[5].pressed = false;
+          }
+        }
+      } else {
+        keys.delete('Escape');
+      }
+      toggleSettingsPanel();
+    }
+  }
+
+  if (state === 'playing') {
