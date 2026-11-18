@@ -88,7 +88,8 @@ export function isLit(p, n, eye, light, sampleDepth, cfg = FLASH) {
 const f = (x) => (Number.isInteger(x) ? x.toFixed(1) : String(x));
 
 /** GLSL for the receiver (stencil-writing) material — same predicate as isLit(). */
-export function receiverShaders(cfg = FLASH) {
+export function receiverShaders(cfg = FLASH, opts = {}) {
+  const thru = opts.thru === true;
   const vertexShader = /* glsl */ `
     varying vec3 vWorld;
     void main() {
@@ -96,6 +97,7 @@ export function receiverShaders(cfg = FLASH) {
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }`;
   const fragmentShader = /* glsl */ `
+    ${thru ? '#define THRU 1' : ''}
     uniform vec3 uLightPos;
     uniform vec3 uLightDir;
     uniform mat4 uLightVP;
@@ -109,7 +111,7 @@ export function receiverShaders(cfg = FLASH) {
     const float BIAS_CONST = ${f(cfg.biasConst)};
     const float BIAS_SLOPE = ${(cfg.biasSlopeTexels * texelScale(cfg)).toExponential(6)};
     const float MAX_SLOPE = ${f(cfg.maxSlope)};
-    uniform float uFalloff;
+    uniform float uDist;
     uniform float uFade;
     float linZ(float z) {
       float ndc = z * 2.0 - 1.0;
@@ -120,12 +122,10 @@ export function receiverShaders(cfg = FLASH) {
       float d = length(toL);
       vec3 L = toL / d;
       
-      // Calculate distance falloff factor (0-1)
-      // Distance attenuation: (1 - d/RANGE)^k with k driven by the FALLOFF
-      // slider (0 = no falloff, 1 = very steep). Falls smoothly to zero AT
-      // max range — no plateau, no hard cut. FLASH OVER inherits this curve
-      // through the visibility alpha.
-      float falloffFactor = pow(1.0 - min(d / RANGE, 1.0), uFalloff * 4.0);
+      // Distance attenuation: LINEAR fade to black from the flashlight to the
+      // FALLOFF DISTANCE (uDist, metres). Fully lit at the lamp, zero exactly at
+      // uDist. FLASH OVER is a shorter linear window inside this same distance.
+      float falloffFactor = clamp(1.0 - d / uDist, 0.0, 1.0);
       
       // Calculate cone edge fade factor (0-1)
       float coneDot = dot(-L, uLightDir);
@@ -143,8 +143,10 @@ export function receiverShaders(cfg = FLASH) {
       float ndl = dot(N, L);
       // Smooth grazing fade: faces angled away from the beam ramp down to dark
       // across FACE_FADE_END of N·L instead of a hard cutoff at NDOTL_MIN.
+      #ifndef THRU
       if (ndl <= 0.0) discard;
       visibility *= smoothstep(0.0, FACE_FADE_END, ndl);
+      #endif
       vec4 lc = uLightVP * vec4(vWorld, 1.0);
       vec2 uv = lc.xy / lc.w * 0.5 + 0.5;
       float occ = linZ(texture2D(uShadow, uv).r);
