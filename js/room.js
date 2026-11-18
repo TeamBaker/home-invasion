@@ -178,8 +178,9 @@ export class RoomSense {
   // Geometry is built once per plane/mesh version (lastChangedTime) and cached.
   _updateOccluders() {
     const meshes = this.model.meshes;
-    for (const [rec, occ] of this.meshOcc) if (meshes.get(occ.userData.key) !== rec) {
-      this._dropOcc(occ); this.meshOcc.delete(rec);
+    for (const [rec, occ] of this.meshOcc) {
+      if (meshes.get(occ.userData.key) !== rec) { this._dropOcc(occ); this.meshOcc.delete(rec); continue; }
+      occ.userData.furniture = this._isFurnitureMesh(occ.geometry, rec.matrix);
     }
     for (const [key, rec] of meshes) {
       if (this.meshOcc.has(rec) || !rec.vertices || !rec.indices) continue;
@@ -188,6 +189,7 @@ export class RoomSense {
       geo.setIndex(new THREE.BufferAttribute(rec.indices, 1));
       const occ = this._addOcc(geo, rec.matrix);
       occ.userData.key = key;
+      occ.userData.furniture = this._isFurnitureMesh(geo, rec.matrix);
       this.meshOcc.set(rec, occ);
     }
     const usePlanes = this.meshOcc.size === 0;
@@ -204,6 +206,48 @@ export class RoomSense {
       rec.occ = this._addOcc(geo, rec.matrix);
       rec.occFloor = floorY;
     }
+  }
+
+  // A scene-mesh occluder counts as furniture when its room-space bounds sit
+  // inside a classified solid-plane footprint — those are the coarse cubes the
+  // Quest scene mesh puts over couches/tables. The flashlight can be set to
+  // pass through them so the beam follows the real furniture instead.
+  _isFurnitureMesh(geo, matrix) {
+    if (this.floorY == null) return false;
+    if (!geo.boundingBox) geo.computeBoundingBox();
+    const bb = geo.boundingBox;
+    const m = new THREE.Matrix4().fromArray(matrix);
+    const v = new THREE.Vector3();
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const [x, y, z] of [
+      [bb.min.x, bb.min.y, bb.min.z], [bb.max.x, bb.min.y, bb.min.z],
+      [bb.min.x, bb.max.y, bb.min.z], [bb.max.x, bb.max.y, bb.min.z],
+      [bb.min.x, bb.min.y, bb.max.z], [bb.max.x, bb.min.y, bb.max.z],
+      [bb.min.x, bb.max.y, bb.max.z], [bb.max.x, bb.max.y, bb.max.z],
+    ]) {
+      v.set(x, y, z).applyMatrix4(m);
+      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+      if (v.z < minZ) minZ = v.z; if (v.z > maxZ) maxZ = v.z;
+    }
+    const PAD = 0.12;   // cubes poke past the real furniture edge — allow for that
+    const pm = new THREE.Matrix4();
+    for (const rec of this.model.planes.values()) {
+      if (rec.kind !== 'solid') continue;
+      const h = (rec.y || 0) - this.floorY;
+      if (h <= 0.05) continue;
+      if (maxY < this.floorY - 0.05 || minY > (rec.y || 0) + 0.2) continue;   // no vertical overlap
+      pm.fromArray(rec.matrix);
+      let pxMin = Infinity, pxMax = -Infinity, pzMin = Infinity, pzMax = -Infinity;
+      for (const p of rec.polygon) {
+        v.set(p.x, 0, p.z).applyMatrix4(pm);
+        if (v.x < pxMin) pxMin = v.x; if (v.x > pxMax) pxMax = v.x;
+        if (v.z < pzMin) pzMin = v.z; if (v.z > pzMax) pzMax = v.z;
+      }
+      if (maxX < pxMin - PAD || minX > pxMax + PAD || maxZ < pzMin - PAD || minZ > pzMax + PAD) continue;
+      return true;
+    }
+    return false;
   }
 
   _addOcc(geo, matrix) {

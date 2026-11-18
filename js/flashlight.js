@@ -18,7 +18,8 @@ export const FLASH = {
   near: 0.1,              // shadow camera near plane (metres)
   shadowRes: 512,         // depth-map size; texel ≈ 2.3 mm at 2 m
   fovMargin: 4,           // degrees added to the shadow frustum so the cone edge never clips
-  ndotlMin: 0.05,         // surfaces more grazing than ~87° to the beam stay dark
+  ndotlMin: 0.05,         // surfaces more grazing than ~87° to the beam stay dark (CPU bool twin)
+  faceFadeEnd: 0.55,      // grazing faces fade smoothly to dark across this N·L range (shader only)
   biasConst: 0.004,       // metres of constant depth bias
   biasSlopeTexels: 1.5,   // slope-scaled bias, in shadow-map texels
   maxSlope: 8,            // clamp on tan(incidence) for the slope bias
@@ -104,6 +105,7 @@ export function receiverShaders(cfg = FLASH) {
     const float NEAR = ${f(cfg.near)};
     const float CONE_COS = ${coneCos(cfg).toFixed(6)};
     const float NDOTL_MIN = ${f(cfg.ndotlMin)};
+    const float FACE_FADE_END = ${f(cfg.faceFadeEnd)};
     const float BIAS_CONST = ${f(cfg.biasConst)};
     const float BIAS_SLOPE = ${(cfg.biasSlopeTexels * texelScale(cfg)).toExponential(6)};
     const float MAX_SLOPE = ${f(cfg.maxSlope)};
@@ -135,7 +137,10 @@ export function receiverShaders(cfg = FLASH) {
       vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
       if (dot(N, cameraPosition - vWorld) < 0.0) N = -N;
       float ndl = dot(N, L);
-      if (ndl < NDOTL_MIN) discard;
+      // Smooth grazing fade: faces angled away from the beam ramp down to dark
+      // across FACE_FADE_END of N·L instead of a hard cutoff at NDOTL_MIN.
+      if (ndl <= 0.0) discard;
+      visibility *= smoothstep(0.0, FACE_FADE_END, ndl);
       vec4 lc = uLightVP * vec4(vWorld, 1.0);
       vec2 uv = lc.xy / lc.w * 0.5 + 0.5;
       float occ = linZ(texture2D(uShadow, uv).r);
