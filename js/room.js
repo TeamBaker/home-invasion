@@ -64,6 +64,11 @@ export class RoomSense {
     // Depth-only occluders (real geometry as a depth mask) — see _updateOccluders.
     this.occluderGroup = new THREE.Group();
     this.group.add(this.occluderGroup);
+    // Light-only occluders: classified planes (walls + furniture tops) — the
+    // dynamic room mesh. The flashlight casts against ONLY these when
+    // SHINE THRU FURNITURE is on; scene-mesh cubes are ignored entirely.
+    this.lightOccGroup = new THREE.Group();
+    this.group.add(this.lightOccGroup);
     this.meshOcc = new Map();   // mesh record → occluder
     
     this.setDebug(this.debug);
@@ -90,6 +95,7 @@ export class RoomSense {
     this.source = 'none';
     this.sim = null;
     for (const m of [...this.occluderGroup.children]) this._dropOcc(m);
+    for (const m of [...this.lightOccGroup.children]) this._dropLightOcc(m);
     this.meshOcc.clear();
   }
 
@@ -149,6 +155,7 @@ export class RoomSense {
 
   _disposeViz(rec) {
     if (rec.occ) { this._dropOcc(rec.occ); rec.occ = null; }
+    if (rec.locc) { this._dropLightOcc(rec.locc); rec.locc = null; }
     if (!rec.viz) return;
     this.group.remove(rec.viz);
     rec.fill.geometry.dispose(); rec.fill.material.dispose();
@@ -178,9 +185,8 @@ export class RoomSense {
   // Geometry is built once per plane/mesh version (lastChangedTime) and cached.
   _updateOccluders() {
     const meshes = this.model.meshes;
-    for (const [rec, occ] of this.meshOcc) {
-      if (meshes.get(occ.userData.key) !== rec) { this._dropOcc(occ); this.meshOcc.delete(rec); continue; }
-      occ.userData.furniture = this._isFurnitureMesh(occ.geometry, rec.matrix);
+    for (const [rec, occ] of this.meshOcc) if (meshes.get(occ.userData.key) !== rec) {
+      this._dropOcc(occ); this.meshOcc.delete(rec);
     }
     for (const [key, rec] of meshes) {
       if (this.meshOcc.has(rec) || !rec.vertices || !rec.indices) continue;
@@ -189,7 +195,6 @@ export class RoomSense {
       geo.setIndex(new THREE.BufferAttribute(rec.indices, 1));
       const occ = this._addOcc(geo, rec.matrix);
       occ.userData.key = key;
-      occ.userData.furniture = this._isFurnitureMesh(geo, rec.matrix);
       this.meshOcc.set(rec, occ);
     }
     const usePlanes = this.meshOcc.size === 0;
@@ -206,60 +211,34 @@ export class RoomSense {
       rec.occ = this._addOcc(geo, rec.matrix);
       rec.occFloor = floorY;
     }
-  }
-
-  // A scene-mesh occluder counts as furniture when its room-space bounds sit
-  // inside a classified solid-plane footprint — those are the coarse cubes the
-  // Quest scene mesh puts over couches/tables. The flashlight can be set to
-  // pass through them so the beam follows the real furniture instead.
-  _isFurnitureMesh(geo, matrix) {
-    if (this.floorY == null) return false;
-    if (!geo.boundingBox) geo.computeBoundingBox();
-    const bb = geo.boundingBox;
-    const m = new THREE.Matrix4().fromArray(matrix);
-    const v = new THREE.Vector3();
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    for (const [x, y, z] of [
-      [bb.min.x, bb.min.y, bb.min.z], [bb.max.x, bb.min.y, bb.min.z],
-      [bb.min.x, bb.max.y, bb.min.z], [bb.max.x, bb.max.y, bb.min.z],
-      [bb.min.x, bb.min.y, bb.max.z], [bb.max.x, bb.min.y, bb.max.z],
-      [bb.min.x, bb.max.y, bb.max.z], [bb.max.x, bb.max.y, bb.max.z],
-    ]) {
-      v.set(x, y, z).applyMatrix4(m);
-      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
-      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
-      if (v.z < minZ) minZ = v.z; if (v.z > maxZ) maxZ = v.z;
-    }
-    const PAD = 0.12;   // cubes poke past the real furniture edge — allow for that
-    const pm = new THREE.Matrix4();
+    // Light-only occluders: the classified dynamic room mesh (walls + furniture
+    // tops). Built for every classified plane regardless of scene meshes, so the
+    // flashlight can cast against ONLY these (SHINE THRU FURNITURE).
     for (const rec of this.model.planes.values()) {
-      if (rec.kind !== 'solid') continue;
-      const h = (rec.y || 0) - this.floorY;
-      if (h <= 0.05) continue;
-      if (maxY < this.floorY - 0.05 || minY > (rec.y || 0) + 0.2) continue;   // no vertical overlap
-      pm.fromArray(rec.matrix);
-      let pxMin = Infinity, pxMax = -Infinity, pzMin = Infinity, pzMax = -Infinity;
-      for (const p of rec.polygon) {
-        v.set(p.x, 0, p.z).applyMatrix4(pm);
-        if (v.x < pxMin) pxMin = v.x; if (v.x > pxMax) pxMax = v.x;
-        if (v.z < pzMin) pzMin = v.z; if (v.z > pzMax) pzMax = v.z;
-      }
-      if (maxX < pxMin - PAD || minX > pxMax + PAD || maxZ < pzMin - PAD || minZ > pzMax + PAD) continue;
-      return true;
+      const want = rec.kind === 'wall' || rec.kind === 'solid';
+      if (rec.locc && (!want || rec.loccFloor !== floorY)) { this._dropLightOcc(rec.locc); rec.locc = null; }
+      if (!want || rec.locc) continue;
+      const shape = new THREE.Shape(rec.polygon.map((p) => new THREE.Vector2(p.x, -p.z)));
+      const h = rec.y - floorY;
+      const geo = rec.kind === 'solid' && h > 0.05
+        ? new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false }).rotateX(-Math.PI / 2).translate(0, -h, 0)
+        : new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2);
+      rec.locc = this._addOcc(geo, rec.matrix, this.lightOccGroup);
+      rec.loccFloor = floorY;
     }
-    return false;
   }
 
-  _addOcc(geo, matrix) {
+  _addOcc(geo, matrix, target) {
     const m = new THREE.Mesh(geo, OCCLUDER_MAT);
     m.renderOrder = -100;           // opaque pass, before the monster and everything else
     m.matrixAutoUpdate = false;
     m.matrix.fromArray(matrix);
-    this.occluderGroup.add(m);
+    (target || this.occluderGroup).add(m);
     return m;
   }
 
   _dropOcc(m) { this.occluderGroup.remove(m); m.geometry.dispose(); }
+  _dropLightOcc(m) { this.lightOccGroup.remove(m); m.geometry.dispose(); }
 
   /** Draw the monster's current plan (room-space points). */
   drawPath(path) {
