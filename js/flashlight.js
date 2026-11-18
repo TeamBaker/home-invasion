@@ -88,7 +88,8 @@ export function isLit(p, n, eye, light, sampleDepth, cfg = FLASH) {
 const f = (x) => (Number.isInteger(x) ? x.toFixed(1) : String(x));
 
 /** GLSL for the receiver (stencil-writing) material — same predicate as isLit(). */
-export function receiverShaders(cfg = FLASH) {
+export function receiverShaders(cfg = FLASH, opts = {}) {
+  const thru = opts.thru === true;
   const vertexShader = /* glsl */ `
     varying vec3 vWorld;
     void main() {
@@ -96,6 +97,7 @@ export function receiverShaders(cfg = FLASH) {
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }`;
   const fragmentShader = /* glsl */ `
+    ${thru ? '#define THRU 1' : ''}
     uniform vec3 uLightPos;
     uniform vec3 uLightDir;
     uniform mat4 uLightVP;
@@ -139,7 +141,9 @@ export function receiverShaders(cfg = FLASH) {
       vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
       if (dot(N, cameraPosition - vWorld) < 0.0) N = -N;
       float ndl = dot(N, L);
+      #ifndef THRU
       if (ndl <= 0.0) discard;
+      #endif
       vec4 lc = uLightVP * vec4(vWorld, 1.0);
       vec2 uv = lc.xy / lc.w * 0.5 + 0.5;
       float occ = linZ(texture2D(uShadow, uv).r);

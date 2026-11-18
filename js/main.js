@@ -680,6 +680,7 @@ let visEyeR = null;          // dedicated camera for the visibility pass (right 
 let casterScene = null;      // depth-pass proxies (separate scene → no recursion into main render)
 let casterMat = null;
 let receiverMat = null;
+let receiverMatThru = null;   // SHINE THRU variant: no away-face test — whole silhouette gets stencil
 const lightProxies = new Map();  // source mesh → { recv, cast, stamp }
 let proxyStamp = 0;
 let visFrameStamp = 0;
@@ -1204,6 +1205,7 @@ function createFlashlight() {
   // if it is in the cone, in range, faces the flashlight and is not in shadow (depth
   // map rendered from the flashlight each frame). The beam through air is invisible.
   const { vertexShader, fragmentShader } = receiverShaders(FLASH);
+  const thruShaders = receiverShaders(FLASH, { thru: true });
   receiverMat = new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader,
@@ -1221,6 +1223,28 @@ function createFlashlight() {
     depthTest: true,
     side: THREE.DoubleSide,
     polygonOffset: true,                     // win the depth tie with the surface it shadows
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -4,
+    stencilWrite: true,
+    stencilRef: 1,
+    stencilFunc: THREE.AlwaysStencilFunc,
+    stencilZPass: THREE.ReplaceStencilOp,
+    stencilZFail: THREE.KeepStencilOp,
+    stencilFail: THREE.KeepStencilOp
+  });
+  // SHINE THRU FURNITURE variant: same stencil test but NO away-face test —
+  // furniture writes stencil across its whole silhouette so its pixels lose the
+  // darkness using the light of the surface BEHIND it (the beam reads as
+  // passing through, not a black hole).
+  receiverMatThru = new THREE.ShaderMaterial({
+    vertexShader,
+    fragmentShader: thruShaders.fragmentShader,
+    uniforms: receiverMat.uniforms,          // shared — one per-frame update serves both
+    colorWrite: false,
+    depthWrite: false,
+    depthTest: true,
+    side: THREE.DoubleSide,
+    polygonOffset: true,
     polygonOffsetFactor: -1,
     polygonOffsetUnits: -4,
     stencilWrite: true,
@@ -1311,6 +1335,7 @@ function createFlashlight() {
         if (visRT2) uOver.uVisTex2.value = visRT2.texture;
         uOver.uHalfW.value = r.xr.isPresenting ? r.domElement.width / 2 : r.domElement.width;
         uOver.uBufH.value = r.domElement.height;
+        uOver.uMaskStrength.value = maskStrength;
       }
     }
   };
@@ -1419,11 +1444,12 @@ function createFlashlight() {
         uniform sampler2D uVisTex2;
         uniform float uHalfW;
         uniform float uBufH;
+        uniform float uMaskStrength;
         varying vec2 vUv;
         void main() {
           vec2 uv = vec2(mod(gl_FragCoord.x, uHalfW), gl_FragCoord.y) / vec2(uHalfW, uBufH);
           float isRight = step(uHalfW, gl_FragCoord.x);
-          float overAmt = mix(texture2D(uVisTex, uv).g, texture2D(uVisTex2, uv).g, isRight);
+          float overAmt = mix(texture2D(uVisTex, uv).g, texture2D(uVisTex2, uv).g, isRight) * (uMaskStrength / 100.0);
           gl_FragColor = vec4(vec3(1.0), overAmt);
         }
       `,
@@ -1431,7 +1457,8 @@ function createFlashlight() {
         uVisTex: { value: null },
         uVisTex2: { value: null },
         uHalfW: { value: 512 },
-        uBufH: { value: 512 }
+        uBufH: { value: 512 },
+        uMaskStrength: { value: maskStrength }
       },
       transparent: true,
       depthTest: false,
@@ -1571,9 +1598,10 @@ function _roomDims() {
 }
 function _syncProxy(src) {
   if (!src.isMesh || !src.geometry) return;
-  // SHINE THRU FURNITURE ON: furniture takes NO part in the flashlight — no
-  // shadows, no light, no stencil, not in the visibility pass. It only visually
-  // blocks 3D objects. OFF: furniture is a normal object (lit, casts shadows).
+  // SHINE THRU FURNITURE ON: furniture casts no shadows and gets no light of
+  // its own — its pixels inherit the light of the surface behind them, so the
+  // beam reads as passing through and landing on what's behind. OFF: furniture
+  // is a normal object (lit, casts shadows).
   if (src.userData.__furn === undefined) {
     if (src.userData.sceneMesh === true) {
       const bb = new THREE.Box3().setFromObject(src);
@@ -1585,7 +1613,6 @@ function _syncProxy(src) {
       src.userData.__furn = src.userData.isFurniture === true;
     }
   }
-  if (flashThruFurniture && src.userData.__furn === true) return;
   let p = lightProxies.get(src);
   if (!p) {
     const recv = new THREE.Mesh(src.geometry, receiverMat);
@@ -1605,7 +1632,12 @@ function _syncProxy(src) {
   p.stamp = proxyStamp;
   p.recv.matrixWorld.copy(src.matrixWorld);
   p.cast.matrixWorld.copy(src.matrixWorld);
-  p.cast.visible = _worldVisible(src);   // casters: three culls them to the light frustum
+  // SHINE THRU FURNITURE: furniture still writes its stencil (its pixels lose
+  // the darkness using the light of the surface behind them) but never CASTS
+  // shadows and is hidden in the visibility pass.
+  const recvOnly = flashThruFurniture && src.userData.__furn === true;
+  p.recv.material = recvOnly ? receiverMatThru : receiverMat;
+  p.cast.visible = _worldVisible(src) && !recvOnly;   // casters: three culls them to the light frustum
   // Receivers outside the beam can never light up — skip their draw call entirely.
   p.recv.visible = _worldVisible(src) && _lightFrustum.intersectsObject(p.recv);
 }
@@ -1716,6 +1748,14 @@ function renderFlashlightShadow(r) {
     }
     r.xr.enabled = false;
     receiverMat.colorWrite = true;
+    // SHINE THRU FURNITURE: hide furniture receivers in the visibility pass —
+    // the surface behind them fills their pixels, so they inherit its light.
+    const _thruHidden = [];
+    if (flashThruFurniture) {
+      for (const [src, p] of lightProxies) {
+        if (p.recv.visible && src.userData.__furn === true) { p.recv.visible = false; _thruHidden.push(p.recv); }
+      }
+    }
     r.setRenderTarget(visRT);
     r.clear(true, true, false);
     r.render(spotGroup, camL);
@@ -1724,6 +1764,7 @@ function renderFlashlightShadow(r) {
       r.clear(true, true, false);
       r.render(spotGroup, camR);
     }
+    for (const m of _thruHidden) m.visible = true;
     r.setRenderTarget(prevTarget);
     r.xr.enabled = xrEnabled;
     receiverMat.colorWrite = false;
