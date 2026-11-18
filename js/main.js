@@ -577,7 +577,7 @@ addEventListener('keydown', (e) => {
   // While the panel is open, arrows/Enter drive the panel instead of the game.
   if (settingsPanelOpen) {
     if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
-      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 7);
+      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 8);
       updateSettingsPanel();
       return;
     }
@@ -600,12 +600,12 @@ addEventListener('keydown', (e) => {
         flashFade = Math.max(0, Math.min(100, flashFade + (e.code === 'ArrowRight' ? 5 : -5)));
         localStorage.setItem('mrh-flash-fade', String(flashFade));
         updateSettingsPanel();
-      } else if (settingsCursor === 6) {
+      } else if (settingsCursor === 7) {
         beamGlowLevel = Math.max(0, Math.min(100, beamGlowLevel + (e.code === 'ArrowRight' ? 5 : -5)));
         localStorage.setItem('mrh-beam-glow', String(beamGlowLevel));
         updateBeamGlow();
         updateSettingsPanel();
-      } else if (settingsCursor === 7) {
+      } else if (settingsCursor === 8) {
         flashOver = Math.max(0, Math.min(100, flashOver + (e.code === 'ArrowRight' ? 5 : -5)));
         localStorage.setItem('mrh-flash-over2', String(flashOver));
         if (flashlightOver) {
@@ -621,6 +621,9 @@ addEventListener('keydown', (e) => {
         flashBeam = !flashBeam;
         localStorage.setItem('mrh-flash-beam', flashBeam ? '1' : '0');
         updateBeamGlow();
+      } else if (settingsCursor === 6) {
+        flashThruFurniture = !flashThruFurniture;
+        localStorage.setItem('mrh-flash-thru2', flashThruFurniture ? '1' : '0');
       }
       updateSettingsPanel();
       return;
@@ -656,6 +659,8 @@ const _storedFade = localStorage.getItem('mrh-flash-fade');
 let flashFade = _storedFade === null ? 30 : Math.max(0, Math.min(100, +(_storedFade) || 0));  // edge fade strength (0-100%)
 const _storedBeam = localStorage.getItem('mrh-flash-beam');
 let flashBeam = _storedBeam === null ? false : _storedBeam === '1';  // beam glow effect on/off
+const _storedThru = localStorage.getItem('mrh-flash-thru2');
+let flashThruFurniture = _storedThru === null ? false : _storedThru === '1';  // ON: furniture is invisible to the flashlight (visual occlusion only)
 const _storedGlow = localStorage.getItem('mrh-beam-glow');
 let beamGlowLevel = _storedGlow === null ? 40 : Math.max(0, Math.min(100, +(_storedGlow) || 0));  // beam visibility (0-100%)
 const _storedOver = localStorage.getItem('mrh-flash-over2');
@@ -735,6 +740,9 @@ function readInput() {
             flashBeam = !flashBeam;
             localStorage.setItem('mrh-flash-beam', flashBeam ? '1' : '0');
             updateBeamGlow();
+          } else if (settingsCursor === 6) {
+            flashThruFurniture = !flashThruFurniture;
+            localStorage.setItem('mrh-flash-thru2', flashThruFurniture ? '1' : '0');
           }
           updateSettingsPanel();
         }
@@ -748,7 +756,7 @@ function readInput() {
 
           if (stickMoved && settingsStickWasZero) {
             if (Math.abs(stickY) > Math.abs(stickX)) {
-              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(7, settingsCursor + 1);
+              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(8, settingsCursor + 1);
               updateSettingsPanel();
             } else if (settingsCursor === 1) {
               roomBrightness = Math.max(0, Math.min(100, roomBrightness + (stickX > 0 ? 1 : -1)));
@@ -768,12 +776,12 @@ function readInput() {
               flashFade = Math.max(0, Math.min(100, flashFade + (stickX > 0 ? 5 : -5)));
               localStorage.setItem('mrh-flash-fade', String(flashFade));
               updateSettingsPanel();
-            } else if (settingsCursor === 6) {
+            } else if (settingsCursor === 7) {
               beamGlowLevel = Math.max(0, Math.min(100, beamGlowLevel + (stickX > 0 ? 5 : -5)));
               localStorage.setItem('mrh-beam-glow', String(beamGlowLevel));
               updateBeamGlow();
               updateSettingsPanel();
-            } else if (settingsCursor === 7) {
+            } else if (settingsCursor === 8) {
               flashOver = Math.max(0, Math.min(100, flashOver + (stickX > 0 ? 5 : -5)));
               localStorage.setItem('mrh-flash-over2', String(flashOver));
               if (flashlightOver) {
@@ -1563,8 +1571,9 @@ function _roomDims() {
 }
 function _syncProxy(src) {
   if (!src.isMesh || !src.geometry) return;
-  // FURNITURE takes NO part in the flashlight — no shadows, no light, no
-  // stencil, not in the visibility pass. It only visually blocks 3D objects.
+  // SHINE THRU FURNITURE ON: furniture takes NO part in the flashlight — no
+  // shadows, no light, no stencil, not in the visibility pass. It only visually
+  // blocks 3D objects. OFF: furniture is a normal object (lit, casts shadows).
   if (src.userData.__furn === undefined) {
     if (src.userData.sceneMesh === true) {
       const bb = new THREE.Box3().setFromObject(src);
@@ -1576,7 +1585,7 @@ function _syncProxy(src) {
       src.userData.__furn = src.userData.isFurniture === true;
     }
   }
-  if (src.userData.__furn === true) return;
+  if (flashThruFurniture && src.userData.__furn === true) return;
   let p = lightProxies.get(src);
   if (!p) {
     const recv = new THREE.Mesh(src.geometry, receiverMat);
@@ -1781,8 +1790,9 @@ function updateSettingsPanel() {
     { text: 'FLASH FALLOFF: ' + flashFalloffFt + ' FT', y: 234 },
     { text: 'FLASH FADE: ' + flashFade + '%', y: 292 },
     { text: 'BEAM: ' + (flashBeam ? 'ON' : 'OFF'), y: 350 },
-    { text: 'BEAM GLOW: ' + beamGlowLevel + '%', y: 408 },
-    { text: 'FLASH OVER: ' + flashOver + '%', y: 466 }
+    { text: 'SHINE THRU FURNITURE: ' + (flashThruFurniture ? 'ON' : 'OFF'), y: 408 },
+    { text: 'BEAM GLOW: ' + beamGlowLevel + '%', y: 466 },
+    { text: 'FLASH OVER: ' + flashOver + '%', y: 524 }
   ];
   ctx.textBaseline = 'middle';
   for (let i = 0; i < rows.length; i++) {
