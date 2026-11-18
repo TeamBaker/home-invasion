@@ -651,7 +651,8 @@ let coneDarkness = null;     // second darkness pass drawn ONLY inside the light
 // cone / range / bias tuning). No raycasts, no bounce light.
 let lightCam = null;         // shadow camera = the flashlight
 let shadowRT = null;         // depth-only shadow map
-let visRT = null;            // visibility render target
+let visRT = null;            // visibility render target (left eye)
+let visRT2 = null;           // visibility render target (right eye)
 let casterScene = null;      // depth-pass proxies (separate scene → no recursion into main render)
 let casterMat = null;
 let receiverMat = null;
@@ -1212,6 +1213,13 @@ function createFlashlight() {
     minFilter: THREE.LinearFilter,
     magFilter: THREE.LinearFilter,
   });
+  visRT2 = new THREE.WebGLRenderTarget(1024, 1024, {
+    depthBuffer: true,
+    stencilBuffer: false,
+    generateMipmaps: false,
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+  });
   shadowRT = new THREE.WebGLRenderTarget(res, res, {
     depthBuffer: true,
     stencilBuffer: false,
@@ -1242,6 +1250,7 @@ function createFlashlight() {
       if (coneDarkness && coneDarkness.material.uniforms && visRT) {
         const uniforms = coneDarkness.material.uniforms;
         uniforms.uVisTex.value = visRT.texture;
+        if (visRT2) uniforms.uVisTex2.value = visRT2.texture;
         uniforms.uHalfW.value = r.xr.isPresenting ? r.drawingBufferWidth / 2 : r.drawingBufferWidth;
         uniforms.uBufH.value = r.drawingBufferHeight;
       }
@@ -1286,13 +1295,16 @@ function createFlashlight() {
       uniform float uRoomBrightness;
       uniform float uMaskStrength;
       uniform sampler2D uVisTex;
+      uniform sampler2D uVisTex2;
       uniform float uHalfW;
       uniform float uBufH;
       varying vec2 vUv;
       void main() {
-        // Sample visibility from texture (per-pixel flashlight visibility)
+        // Sample visibility from the current eye's texture (per-pixel flashlight
+        // visibility). Left eye / desktop -> uVisTex; right eye -> uVisTex2.
         vec2 uv = vec2(mod(gl_FragCoord.x, uHalfW), gl_FragCoord.y) / vec2(uHalfW, uBufH);
-        float visibility = texture2D(uVisTex, uv).a;
+        float isRight = step(uHalfW, gl_FragCoord.x);
+        float visibility = mix(texture2D(uVisTex, uv).a, texture2D(uVisTex2, uv).a, isRight);
         
         // Base darkness level
         float baseDarkness = 1.0 - (uRoomBrightness / 100.0);
@@ -1307,6 +1319,7 @@ function createFlashlight() {
       uRoomBrightness: { value: roomBrightness },
       uMaskStrength: { value: maskStrength },
       uVisTex: { value: null },
+      uVisTex2: { value: null },
       uHalfW: { value: 512 },
       uBufH: { value: 512 }
     }
@@ -1518,16 +1531,29 @@ function renderFlashlightShadow(r) {
   r.autoClear = autoClear;
   r.xr.enabled = xrEnabled;
 
-  // 4. Visibility pass: render spot receivers to visRT with colorWrite enabled
-  // Run once per frame (XR renders twice, once per eye)
+  // 4. Visibility pass: render spot receivers PER EYE with colorWrite enabled.
+  // XR MUST be off for these nested renders: while presenting, r.render() swaps
+  // the camera for the XR ArrayCamera and draws per-eye with main-buffer viewports,
+  // which corrupts the render target AND the renderer's viewport state (breaks the
+  // darkness, menus and monster rendering for both eyes on Quest). The depth pass
+  // disables XR for the same reason.
   if (visRT && visFrameStamp !== performance.now()) {
     visFrameStamp = performance.now();
-    const eyeCam = r.xr.isPresenting && r.xr.getCamera().cameras.length > 0 ? r.xr.getCamera().cameras[0] : camera;
+    const xrActive = r.xr.enabled && r.xr.isPresenting && r.xr.getCamera() && r.xr.getCamera().cameras.length > 1;
+    const eyeCamL = xrActive ? r.xr.getCamera().cameras[0] : camera;
+    const eyeCamR = xrActive ? r.xr.getCamera().cameras[1] : null;
+    r.xr.enabled = false;
     receiverMat.colorWrite = true;
     r.setRenderTarget(visRT);
     r.clear(true, true, false);
-    r.render(spotGroup, eyeCam);
+    r.render(spotGroup, eyeCamL);
+    if (eyeCamR && visRT2) {
+      r.setRenderTarget(visRT2);
+      r.clear(true, true, false);
+      r.render(spotGroup, eyeCamR);
+    }
     r.setRenderTarget(prevTarget);
+    r.xr.enabled = xrEnabled;
     receiverMat.colorWrite = false;
   }
 }
