@@ -653,6 +653,8 @@ let lightCam = null;         // shadow camera = the flashlight
 let shadowRT = null;         // depth-only shadow map
 let visRT = null;            // visibility render target (left eye)
 let visRT2 = null;           // visibility render target (right eye)
+let visEyeL = null;          // dedicated camera for the visibility pass (left eye)
+let visEyeR = null;          // dedicated camera for the visibility pass (right eye)
 let casterScene = null;      // depth-pass proxies (separate scene → no recursion into main render)
 let casterMat = null;
 let receiverMat = null;
@@ -1220,6 +1222,10 @@ function createFlashlight() {
     minFilter: THREE.LinearFilter,
     magFilter: THREE.LinearFilter,
   });
+  visEyeL = new THREE.PerspectiveCamera();
+  visEyeR = new THREE.PerspectiveCamera();
+  visEyeL.matrixWorldAutoUpdate = false;
+  visEyeR.matrixWorldAutoUpdate = false;
   shadowRT = new THREE.WebGLRenderTarget(res, res, {
     depthBuffer: true,
     stencilBuffer: false,
@@ -1540,17 +1546,32 @@ function renderFlashlightShadow(r) {
   if (visRT && visFrameStamp !== performance.now()) {
     visFrameStamp = performance.now();
     const xrActive = r.xr.enabled && r.xr.isPresenting && r.xr.getCamera() && r.xr.getCamera().cameras.length > 1;
-    const eyeCamL = xrActive ? r.xr.getCamera().cameras[0] : camera;
-    const eyeCamR = xrActive ? r.xr.getCamera().cameras[1] : null;
+    // Render through DEDICATED cameras with matrixWorldAutoUpdate off: three.js
+    // recomputes matrixWorld from position/quaternion for parentless cameras, but
+    // the XR eye cameras carry their pose in matrixWorld only — recomputing
+    // collapses them to the origin and the visibility RT comes out empty on Quest.
+    // Copying the XR matrices into cameras that never auto-update mirrors the
+    // depth pass's lightCam pattern.
+    const camL = xrActive ? visEyeL : camera;
+    const camR = xrActive ? visEyeR : null;
+    if (xrActive) {
+      const xrSub = r.xr.getCamera().cameras;
+      visEyeL.projectionMatrix.copy(xrSub[0].projectionMatrix);
+      visEyeL.matrixWorld.copy(xrSub[0].matrixWorld);
+      visEyeL.matrixWorldInverse.copy(xrSub[0].matrixWorldInverse);
+      visEyeR.projectionMatrix.copy(xrSub[1].projectionMatrix);
+      visEyeR.matrixWorld.copy(xrSub[1].matrixWorld);
+      visEyeR.matrixWorldInverse.copy(xrSub[1].matrixWorldInverse);
+    }
     r.xr.enabled = false;
     receiverMat.colorWrite = true;
     r.setRenderTarget(visRT);
     r.clear(true, true, false);
-    r.render(spotGroup, eyeCamL);
-    if (eyeCamR && visRT2) {
+    r.render(spotGroup, camL);
+    if (camR && visRT2) {
       r.setRenderTarget(visRT2);
       r.clear(true, true, false);
-      r.render(spotGroup, eyeCamR);
+      r.render(spotGroup, camR);
     }
     r.setRenderTarget(prevTarget);
     r.xr.enabled = xrEnabled;
@@ -1662,3 +1683,6 @@ function toggleSettingsPanel() {
     console.warn('settings panel error:', err);
   }
 }
+
+// Debug handle for console-driven verification (renderer + visibility RTs).
+window.__hi_dbg = { r: renderer, vis: () => [visRT, visRT2], eyeCams: () => [visEyeL, visEyeR] };
