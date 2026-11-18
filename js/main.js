@@ -577,13 +577,13 @@ addEventListener('keydown', (e) => {
   // While the panel is open, arrows/Enter drive the panel instead of the game.
   if (settingsPanelOpen) {
     if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
-      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 2);
+      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 5);
       updateSettingsPanel();
       return;
     }
     if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
       if (settingsCursor === 1) {
-        roomBrightness = Math.max(0, Math.min(100, roomBrightness + (e.code === 'ArrowRight' ? 5 : -5)));
+        roomBrightness = Math.max(0, Math.min(100, roomBrightness + (e.code === 'ArrowRight' ? 1 : -1)));
         localStorage.setItem('mrh-room-brightness', String(roomBrightness));
         applyDarknessLevels();
         updateSettingsPanel();
@@ -592,11 +592,24 @@ addEventListener('keydown', (e) => {
         localStorage.setItem('mrh-mask-strength', String(maskStrength));
         applyDarknessLevels();
         updateSettingsPanel();
+      } else if (settingsCursor === 3) {
+        flashFalloff = Math.max(0, Math.min(100, flashFalloff + (e.code === 'ArrowRight' ? 5 : -5)));
+        localStorage.setItem('mrh-flash-falloff', String(flashFalloff));
+        updateSettingsPanel();
+      } else if (settingsCursor === 4) {
+        flashFade = Math.max(0, Math.min(100, flashFade + (e.code === 'ArrowRight' ? 5 : -5)));
+        localStorage.setItem('mrh-flash-fade', String(flashFade));
+        updateSettingsPanel();
       }
       return;
     }
     if (e.code === 'Enter') {
       if (settingsCursor === 0) toggleFlashlightMode();
+      else if (settingsCursor === 5) {
+        flashBeam = !flashBeam;
+        localStorage.setItem('mrh-flash-beam', flashBeam ? '1' : '0');
+        updateBeamGlow();
+      }
       updateSettingsPanel();
       return;
     }
@@ -625,6 +638,12 @@ let flashlightFlickerTime = 0;
 let roomBrightness = +(localStorage.getItem('mrh-room-brightness') || 0);  // 0 = pitch black, 100 = fully lit
 const _storedMask = localStorage.getItem('mrh-mask-strength');
 let maskStrength = _storedMask === null ? 100 : Math.max(0, Math.min(100, +(_storedMask) || 0));  // % of darkness the light spot removes
+const _storedFalloff = localStorage.getItem('mrh-flash-falloff');
+let flashFalloff = _storedFalloff === null ? 50 : Math.max(0, Math.min(100, +(_storedFalloff) || 0));  // distance falloff strength (0-100%)
+const _storedFade = localStorage.getItem('mrh-flash-fade');
+let flashFade = _storedFade === null ? 30 : Math.max(0, Math.min(100, +(_storedFade) || 0));  // edge fade strength (0-100%)
+const _storedBeam = localStorage.getItem('mrh-flash-beam');
+let flashBeam = _storedBeam === null ? false : _storedBeam === '1';  // beam glow effect on/off
 let spotGroup = null;        // light receivers: stencil-only redraw of the room/monster, lit per pixel
 let coneDarkness = null;     // second darkness pass drawn ONLY inside the light spot
 
@@ -632,11 +651,13 @@ let coneDarkness = null;     // second darkness pass drawn ONLY inside the light
 // cone / range / bias tuning). No raycasts, no bounce light.
 let lightCam = null;         // shadow camera = the flashlight
 let shadowRT = null;         // depth-only shadow map
+let visRT = null;            // visibility render target
 let casterScene = null;      // depth-pass proxies (separate scene → no recursion into main render)
 let casterMat = null;
 let receiverMat = null;
 const lightProxies = new Map();  // source mesh → { recv, cast, stamp }
 let proxyStamp = 0;
+let visFrameStamp = 0;
 
 // Settings panel (Y button / Tab)
 let settingsPanelOpen = false;
@@ -690,6 +711,11 @@ function readInput() {
         const triggerDown = !!gp.buttons[0]?.pressed;
         if (triggerDown && !settingsTriggerWasDown && settingsPanelOpen) {
           if (settingsCursor === 0) toggleFlashlightMode();
+          else if (settingsCursor === 5) {
+            flashBeam = !flashBeam;
+            localStorage.setItem('mrh-flash-beam', flashBeam ? '1' : '0');
+            updateBeamGlow();
+          }
           updateSettingsPanel();
         }
         settingsTriggerWasDown = triggerDown;
@@ -702,10 +728,10 @@ function readInput() {
 
           if (stickMoved && settingsStickWasZero) {
             if (Math.abs(stickY) > Math.abs(stickX)) {
-              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(2, settingsCursor + 1);
+              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(5, settingsCursor + 1);
               updateSettingsPanel();
             } else if (settingsCursor === 1) {
-              roomBrightness = Math.max(0, Math.min(100, roomBrightness + (stickX > 0 ? 5 : -5)));
+              roomBrightness = Math.max(0, Math.min(100, roomBrightness + (stickX > 0 ? 1 : -1)));
               localStorage.setItem('mrh-room-brightness', String(roomBrightness));
               applyDarknessLevels();
               updateSettingsPanel();
@@ -713,6 +739,14 @@ function readInput() {
               maskStrength = Math.max(0, Math.min(100, maskStrength + (stickX > 0 ? 5 : -5)));
               localStorage.setItem('mrh-mask-strength', String(maskStrength));
               applyDarknessLevels();
+              updateSettingsPanel();
+            } else if (settingsCursor === 3) {
+              flashFalloff = Math.max(0, Math.min(100, flashFalloff + (stickX > 0 ? 5 : -5)));
+              localStorage.setItem('mrh-flash-falloff', String(flashFalloff));
+              updateSettingsPanel();
+            } else if (settingsCursor === 4) {
+              flashFade = Math.max(0, Math.min(100, flashFade + (stickX > 0 ? 5 : -5)));
+              localStorage.setItem('mrh-flash-fade', String(flashFade));
               updateSettingsPanel();
             }
             settingsStickWasZero = false;
@@ -1137,6 +1171,8 @@ function createFlashlight() {
       uLightDir: { value: new THREE.Vector3(0, 0, -1) },
       uLightVP: { value: new THREE.Matrix4() },
       uShadow: { value: null },
+      uFalloff: { value: 0.5 },
+      uFade: { value: 0.3 },
     },
     colorWrite: false,
     depthWrite: false,
@@ -1167,6 +1203,21 @@ function createFlashlight() {
     generateMipmaps: false,
     minFilter: THREE.NearestFilter,
     magFilter: THREE.NearestFilter,
+  });
+  // Visibility render target for per-pixel flashlight visibility
+  visRT = new THREE.WebGLRenderTarget(1024, 1024, {
+    depthBuffer: true,
+    stencilBuffer: false,
+    generateMipmaps: false,
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+  });
+  shadowRT = new THREE.WebGLRenderTarget(res, res, {
+    depthBuffer: true,
+    stencilBuffer: false,
+    generateMipmaps: false,
+    minFilter: THREE.NearestFilter,
+    magFilter: THREE.NearestFilter,
     depthTexture: new THREE.DepthTexture(res, res),
   });
   receiverMat.uniforms.uShadow.value = shadowRT.depthTexture;
@@ -1185,7 +1236,16 @@ function createFlashlight() {
   const prevBeforeRender = scene.onBeforeRender;
   scene.onBeforeRender = function (r, s, c, rt) {
     prevBeforeRender.call(this, r, s, c, rt);
-    if (flashlightMode) renderFlashlightShadow(r);
+    if (flashlightMode) {
+      renderFlashlightShadow(r);
+      // Update cone darkness uniforms with visibility texture
+      if (coneDarkness && coneDarkness.material.uniforms && visRT) {
+        const uniforms = coneDarkness.material.uniforms;
+        uniforms.uVisTex.value = visRT.texture;
+        uniforms.uHalfW.value = r.xr.isPresenting ? r.drawingBufferWidth / 2 : r.drawingBufferWidth;
+        uniforms.uBufH.value = r.drawingBufferHeight;
+      }
+    }
   };
 
   // Darkness overlay with stencil test
@@ -1213,12 +1273,52 @@ function createFlashlight() {
 
   // Partial-removal pass: re-covers the light spot with a fraction of the
   // darkness (MASK REMOVAL %). Stencil Equal = only where the spot marked.
+  // Now uses per-pixel visibility from the receiver pass alpha channel.
+  const coneDarknessShader = {
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uRoomBrightness;
+      uniform float uMaskStrength;
+      uniform sampler2D uVisTex;
+      uniform float uHalfW;
+      uniform float uBufH;
+      varying vec2 vUv;
+      void main() {
+        // Sample visibility from texture (per-pixel flashlight visibility)
+        vec2 uv = vec2(mod(gl_FragCoord.x, uHalfW), gl_FragCoord.y) / vec2(uHalfW, uBufH);
+        float visibility = texture2D(uVisTex, uv).a;
+        
+        // Base darkness level
+        float baseDarkness = 1.0 - (uRoomBrightness / 100.0);
+        
+        // Apply mask strength and visibility
+        float finalOpacity = baseDarkness * (1.0 - (uMaskStrength / 100.0) * visibility);
+        
+        gl_FragColor = vec4(0.0, 0.0, 0.0, finalOpacity);
+      }
+    `,
+    uniforms: {
+      uRoomBrightness: { value: roomBrightness },
+      uMaskStrength: { value: maskStrength },
+      uVisTex: { value: null },
+      uHalfW: { value: 512 },
+      uBufH: { value: 512 }
+    }
+  };
+  
   coneDarkness = new THREE.Mesh(
     new THREE.PlaneGeometry(20, 20),
-    new THREE.MeshBasicMaterial({
-      color: 0x000000,
+    new THREE.ShaderMaterial({
+      vertexShader: coneDarknessShader.vertexShader,
+      fragmentShader: coneDarknessShader.fragmentShader,
+      uniforms: coneDarknessShader.uniforms,
       transparent: true,
-      opacity: (1.0 - (roomBrightness / 100)) * (1.0 - (maskStrength / 100)),
       depthTest: false,
       depthWrite: false,
       stencilWrite: true,
@@ -1233,6 +1333,37 @@ function createFlashlight() {
   coneDarkness.renderOrder = 2001;          // after darknessOverlay
   coneDarkness.visible = false;
   camera.add(coneDarkness);
+}
+
+function updateBeamGlow() {
+  if (!flashlightModel) return;
+  
+  if (flashBeam && !beamGlow) {
+    // Create beam glow effect
+    const length = FLASH.range * 0.6;
+    const radius = length * Math.tan(FLASH.coneAngle / 2);
+    const beamGeom = new THREE.ConeGeometry(radius, length, 8);
+    beamGeom.translate(0, -length / 2, 0);
+    beamGeom.rotateX(Math.PI / 2);
+    
+    beamGlow = new THREE.Mesh(
+      beamGeom,
+      new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.15,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.BackSide
+      })
+    );
+    beamGlow.visible = false;
+    flashlightModel.add(beamGlow);
+  }
+  
+  if (beamGlow) {
+    beamGlow.visible = flashBeam && flashlightMode;
+  }
 }
 
 function toggleFlashlightMode() {
@@ -1358,6 +1489,8 @@ function renderFlashlightShadow(r) {
   u.uLightPos.value.copy(lightCam.position);
   u.uLightDir.value.set(0, 0, -1).applyQuaternion(lightCam.quaternion);
   u.uLightVP.value.multiplyMatrices(lightCam.projectionMatrix, lightCam.matrixWorldInverse);
+  u.uFalloff.value = flashFalloff / 100;
+  u.uFade.value = flashFade / 100;
   _lightFrustum.setFromProjectionMatrix(u.uLightVP.value);
 
   // 2. Mirror the light targets (room occluders + floor + monster) — matrices are fresh here.
@@ -1384,6 +1517,19 @@ function renderFlashlightShadow(r) {
   r.setRenderTarget(prevTarget);
   r.autoClear = autoClear;
   r.xr.enabled = xrEnabled;
+
+  // 4. Visibility pass: render spot receivers to visRT with colorWrite enabled
+  // Run once per frame (XR renders twice, once per eye)
+  if (visRT && visFrameStamp !== performance.now()) {
+    visFrameStamp = performance.now();
+    const eyeCam = r.xr.isPresenting && r.xr.getCamera().cameras.length > 0 ? r.xr.getCamera().cameras[0] : camera;
+    receiverMat.colorWrite = true;
+    r.setRenderTarget(visRT);
+    r.clear(true, true, false);
+    r.render(spotGroup, eyeCam);
+    r.setRenderTarget(prevTarget);
+    receiverMat.colorWrite = false;
+  }
 }
 
 // Darkness opacity is driven by two settings: ROOM BRIGHTNESS (overall darkness)
@@ -1391,7 +1537,10 @@ function renderFlashlightShadow(r) {
 function applyDarknessLevels() {
   const base = 1.0 - (roomBrightness / 100);
   if (darknessOverlay) darknessOverlay.material.opacity = base;
-  if (coneDarkness) coneDarkness.material.opacity = base * (1.0 - (maskStrength / 100));
+  if (coneDarkness && coneDarkness.material.uniforms) {
+    coneDarkness.material.uniforms.uRoomBrightness.value = roomBrightness;
+    coneDarkness.material.uniforms.uMaskStrength.value = maskStrength;
+  }
 }
 
 // ───────────────────────── settings panel ─────────────────────────
@@ -1402,7 +1551,7 @@ function createSettingsPanel() {
 
   settingsCanvas = document.createElement('canvas');
   settingsCanvas.width = 512;
-  settingsCanvas.height = 300;
+  settingsCanvas.height = 480;
   settingsCtx = settingsCanvas.getContext('2d');
   settingsTex = new THREE.CanvasTexture(settingsCanvas);
 
@@ -1412,7 +1561,7 @@ function createSettingsPanel() {
     depthTest: false,
     depthWrite: false
   });
-  settingsPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.41), mat);
+  settingsPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.656), mat);
   settingsPanel.renderOrder = 3000;
   settingsPanel.position.set(0, -0.28, -1.1);   // slightly below view center, ~1m ahead
   settingsPanel.visible = false;
@@ -1424,7 +1573,7 @@ function createSettingsPanel() {
 function updateSettingsPanel() {
   if (!settingsCtx) return;
   const ctx = settingsCtx;
-  const W = 512, H = 300;
+  const W = 512, H = 480;
 
   ctx.clearRect(0, 0, W, H);
   // Card background
@@ -1439,7 +1588,10 @@ function updateSettingsPanel() {
   const rows = [
     { text: 'FLASHLIGHT MODE: ' + (flashlightMode ? 'ON' : 'OFF'), y: 70 },
     { text: 'ROOM BRIGHTNESS: ' + roomBrightness + '%', y: 140 },
-    { text: 'MASK REMOVAL: ' + maskStrength + '%', y: 210 }
+    { text: 'MASK REMOVAL: ' + maskStrength + '%', y: 210 },
+    { text: 'FLASH FALLOFF: ' + flashFalloff + '%', y: 280 },
+    { text: 'FLASH FADE: ' + flashFade + '%', y: 350 },
+    { text: 'BEAM: ' + (flashBeam ? 'ON' : 'OFF'), y: 420 }
   ];
   ctx.textBaseline = 'middle';
   for (let i = 0; i < rows.length; i++) {
@@ -1461,8 +1613,8 @@ function updateSettingsPanel() {
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
   ctx.font = '20px monospace';
-  ctx.fillText('stick: navigate · stick ←/→: adjust · trigger: select', W / 2, 258);
-  ctx.fillText('Y: close', W / 2, 282);
+  ctx.fillText('stick: navigate · stick ←/→: adjust · trigger: select', W / 2, 438);
+  ctx.fillText('Y: close', W / 2, 462);
 
   settingsTex.needsUpdate = true;
 }
