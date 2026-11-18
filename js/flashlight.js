@@ -107,6 +107,8 @@ export function receiverShaders(cfg = FLASH) {
     const float BIAS_CONST = ${f(cfg.biasConst)};
     const float BIAS_SLOPE = ${(cfg.biasSlopeTexels * texelScale(cfg)).toExponential(6)};
     const float MAX_SLOPE = ${f(cfg.maxSlope)};
+    uniform float uFalloff;
+    uniform float uFade;
     float linZ(float z) {
       float ndc = z * 2.0 - 1.0;
       return 2.0 * NEAR * RANGE / (RANGE + NEAR - ndc * (RANGE - NEAR));
@@ -115,7 +117,19 @@ export function receiverShaders(cfg = FLASH) {
       vec3 toL = uLightPos - vWorld;
       float d = length(toL);
       vec3 L = toL / d;
-      if (d > RANGE || dot(-L, uLightDir) < CONE_COS) discard;
+      
+      // Calculate distance falloff factor (0-1)
+      float falloffFactor = 1.0 - smoothstep(0.0, RANGE, d) * uFalloff;
+      
+      // Calculate cone edge fade factor (0-1)
+      float coneDot = dot(-L, uLightDir);
+      float fadeFactor = smoothstep(CONE_COS - 0.2 * uFade, CONE_COS, coneDot);
+      
+      // Combine falloff and fade
+      float visibility = falloffFactor * fadeFactor;
+      
+      if (visibility <= 0.0 || d > RANGE || coneDot < CONE_COS - 0.2) discard;
+      
       // Flat geometric normal from screen derivatives (no normal attribute needed),
       // oriented toward the viewer: we can only see the lit side if the light is on our side.
       vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
@@ -127,7 +141,9 @@ export function receiverShaders(cfg = FLASH) {
       float occ = linZ(texture2D(uShadow, uv).r);
       float tanT = min(sqrt(max(1.0 - ndl * ndl, 0.0)) / ndl, MAX_SLOPE);
       if (lc.w - occ > BIAS_CONST + BIAS_SLOPE * lc.w * tanT) discard;
-      gl_FragColor = vec4(0.0);
+      
+      // Write visibility to alpha channel for use in darkness overlay
+      gl_FragColor = vec4(0.0, 0.0, 0.0, visibility);
     }`;
   return { vertexShader, fragmentShader };
 }
