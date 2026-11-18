@@ -18,7 +18,8 @@ export const FLASH = {
   near: 0.1,              // shadow camera near plane (metres)
   shadowRes: 512,         // depth-map size; texel ≈ 2.3 mm at 2 m
   fovMargin: 4,           // degrees added to the shadow frustum so the cone edge never clips
-  ndotlMin: 0.05,         // surfaces more grazing than ~87° to the beam stay dark
+  ndotlMin: 0.05,         // surfaces more grazing than ~87° to the beam stay dark (CPU bool twin)
+  faceFadeEnd: 0.55,      // grazing faces fade smoothly to dark across this N·L range (shader only)
   biasConst: 0.004,       // metres of constant depth bias
   biasSlopeTexels: 1.5,   // slope-scaled bias, in shadow-map texels
   maxSlope: 8,            // clamp on tan(incidence) for the slope bias
@@ -87,7 +88,8 @@ export function isLit(p, n, eye, light, sampleDepth, cfg = FLASH) {
 const f = (x) => (Number.isInteger(x) ? x.toFixed(1) : String(x));
 
 /** GLSL for the receiver (stencil-writing) material — same predicate as isLit(). */
-export function receiverShaders(cfg = FLASH) {
+export function receiverShaders(cfg = FLASH, opts = {}) {
+  const thru = opts.thru === true;
   const vertexShader = /* glsl */ `
     varying vec3 vWorld;
     void main() {
@@ -95,6 +97,7 @@ export function receiverShaders(cfg = FLASH) {
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }`;
   const fragmentShader = /* glsl */ `
+    ${thru ? '#define THRU 1' : ''}
     uniform vec3 uLightPos;
     uniform vec3 uLightDir;
     uniform mat4 uLightVP;
@@ -103,11 +106,11 @@ export function receiverShaders(cfg = FLASH) {
     const float RANGE = ${f(cfg.range)};
     const float NEAR = ${f(cfg.near)};
     const float CONE_COS = ${coneCos(cfg).toFixed(6)};
-    const float NDOTL_MIN = ${f(cfg.ndotlMin)};
     const float BIAS_CONST = ${f(cfg.biasConst)};
     const float BIAS_SLOPE = ${(cfg.biasSlopeTexels * texelScale(cfg)).toExponential(6)};
     const float MAX_SLOPE = ${f(cfg.maxSlope)};
-    uniform float uFalloff;
+    uniform float uDist;
+    uniform float uOverReach;
     uniform float uFade;
     float linZ(float z) {
       float ndc = z * 2.0 - 1.0;
@@ -118,8 +121,10 @@ export function receiverShaders(cfg = FLASH) {
       float d = length(toL);
       vec3 L = toL / d;
       
-      // Calculate distance falloff factor (0-1)
-      float falloffFactor = 1.0 - smoothstep(0.0, RANGE, d) * uFalloff;
+      // Distance attenuation: LINEAR fade to black from the flashlight to the
+      // FALLOFF DISTANCE (uDist, metres). Fully lit at the lamp, zero exactly at
+      // uDist. FLASH OVER is a shorter linear window inside this same distance.
+      float falloffFactor = clamp(1.0 - d / uDist, 0.0, 1.0);
       
       // Calculate cone edge fade factor (0-1)
       float coneDot = dot(-L, uLightDir);
@@ -127,6 +132,7 @@ export function receiverShaders(cfg = FLASH) {
       
       // Combine falloff and fade
       float visibility = falloffFactor * fadeFactor;
+      float shape = fadeFactor;
       
       if (visibility <= 0.0 || d > RANGE || coneDot < CONE_COS - 0.2) discard;
       
@@ -135,15 +141,21 @@ export function receiverShaders(cfg = FLASH) {
       vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
       if (dot(N, cameraPosition - vWorld) < 0.0) N = -N;
       float ndl = dot(N, L);
-      if (ndl < NDOTL_MIN) discard;
+      #ifndef THRU
+      if (ndl <= 0.0) discard;
+      #endif
       vec4 lc = uLightVP * vec4(vWorld, 1.0);
       vec2 uv = lc.xy / lc.w * 0.5 + 0.5;
       float occ = linZ(texture2D(uShadow, uv).r);
       float tanT = min(sqrt(max(1.0 - ndl * ndl, 0.0)) / ndl, MAX_SLOPE);
       if (lc.w - occ > BIAS_CONST + BIAS_SLOPE * lc.w * tanT) discard;
       
-      // Write visibility to alpha channel for use in darkness overlay
-      gl_FragColor = vec4(0.0, 0.0, 0.0, visibility);
+      // G = over-bright amount: the beam's FULL shape (cone edge + fade + N·L,
+      // same dimensions as the main light) scaled by the FLASH OVER linear reach
+      // (white at the lamp, zero at uOverReach). A = full visibility (with the
+      // distance falloff) for the darkness removal.
+      float overShape = shape * clamp(1.0 - d / uOverReach, 0.0, 1.0) * step(0.0001, uOverReach);
+      gl_FragColor = vec4(0.0, overShape, 0.0, visibility);
     }`;
   return { vertexShader, fragmentShader };
 }

@@ -64,6 +64,11 @@ export class RoomSense {
     // Depth-only occluders (real geometry as a depth mask) — see _updateOccluders.
     this.occluderGroup = new THREE.Group();
     this.group.add(this.occluderGroup);
+    // Light-only occluders: classified planes (walls + furniture tops) — the
+    // dynamic room mesh. The flashlight casts against ONLY these when
+    // SHINE THRU FURNITURE is on; scene-mesh cubes are ignored entirely.
+    this.lightOccGroup = new THREE.Group();
+    this.group.add(this.lightOccGroup);
     this.meshOcc = new Map();   // mesh record → occluder
     
     this.setDebug(this.debug);
@@ -90,6 +95,7 @@ export class RoomSense {
     this.source = 'none';
     this.sim = null;
     for (const m of [...this.occluderGroup.children]) this._dropOcc(m);
+    for (const m of [...this.lightOccGroup.children]) this._dropLightOcc(m);
     this.meshOcc.clear();
   }
 
@@ -149,6 +155,7 @@ export class RoomSense {
 
   _disposeViz(rec) {
     if (rec.occ) { this._dropOcc(rec.occ); rec.occ = null; }
+    if (rec.locc) { this._dropLightOcc(rec.locc); rec.locc = null; }
     if (!rec.viz) return;
     this.group.remove(rec.viz);
     rec.fill.geometry.dispose(); rec.fill.material.dispose();
@@ -188,6 +195,7 @@ export class RoomSense {
       geo.setIndex(new THREE.BufferAttribute(rec.indices, 1));
       const occ = this._addOcc(geo, rec.matrix);
       occ.userData.key = key;
+      occ.userData.sceneMesh = true;   // scene-mesh occluder (furniture cubes etc.)
       this.meshOcc.set(rec, occ);
     }
     const usePlanes = this.meshOcc.size === 0;
@@ -202,20 +210,39 @@ export class RoomSense {
         ? new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false }).rotateX(-Math.PI / 2).translate(0, -h, 0)
         : new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2);
       rec.occ = this._addOcc(geo, rec.matrix);
+      if (rec.kind === 'solid') rec.occ.userData.isFurniture = true;   // furniture plane (couch/table…)
       rec.occFloor = floorY;
+    }
+    this._syncLightOccluders();
+  }
+
+  // Light-only occluders: WALLS only. SHINE THRU FURNITURE means the beam
+  // ignores furniture entirely — scene-mesh cubes AND solid planes — so the
+  // light passes through it and lands on the wall behind.
+  _syncLightOccluders() {
+    const floorY = this.floorY;
+    for (const rec of this.model.planes.values()) {
+      const want = rec.kind === 'wall';
+      if (rec.locc && (!want || rec.loccFloor !== floorY)) { this._dropLightOcc(rec.locc); rec.locc = null; }
+      if (!want || rec.locc) continue;
+      const shape = new THREE.Shape(rec.polygon.map((p) => new THREE.Vector2(p.x, -p.z)));
+      const geo = new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2);
+      rec.locc = this._addOcc(geo, rec.matrix, this.lightOccGroup);
+      rec.loccFloor = floorY;
     }
   }
 
-  _addOcc(geo, matrix) {
+  _addOcc(geo, matrix, target) {
     const m = new THREE.Mesh(geo, OCCLUDER_MAT);
     m.renderOrder = -100;           // opaque pass, before the monster and everything else
     m.matrixAutoUpdate = false;
     m.matrix.fromArray(matrix);
-    this.occluderGroup.add(m);
+    (target || this.occluderGroup).add(m);
     return m;
   }
 
   _dropOcc(m) { this.occluderGroup.remove(m); m.geometry.dispose(); }
+  _dropLightOcc(m) { this.lightOccGroup.remove(m); m.geometry.dispose(); }
 
   /** Draw the monster's current plan (room-space points). */
   drawPath(path) {
