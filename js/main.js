@@ -577,7 +577,7 @@ addEventListener('keydown', (e) => {
   // While the panel is open, arrows/Enter drive the panel instead of the game.
   if (settingsPanelOpen) {
     if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
-      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 8);
+      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 7);
       updateSettingsPanel();
       return;
     }
@@ -600,12 +600,12 @@ addEventListener('keydown', (e) => {
         flashFade = Math.max(0, Math.min(100, flashFade + (e.code === 'ArrowRight' ? 5 : -5)));
         localStorage.setItem('mrh-flash-fade', String(flashFade));
         updateSettingsPanel();
-      } else if (settingsCursor === 7) {
+      } else if (settingsCursor === 6) {
         beamGlowLevel = Math.max(0, Math.min(100, beamGlowLevel + (e.code === 'ArrowRight' ? 5 : -5)));
         localStorage.setItem('mrh-beam-glow', String(beamGlowLevel));
         updateBeamGlow();
         updateSettingsPanel();
-      } else if (settingsCursor === 8) {
+      } else if (settingsCursor === 7) {
         flashOver = Math.max(0, Math.min(100, flashOver + (e.code === 'ArrowRight' ? 5 : -5)));
         localStorage.setItem('mrh-flash-over2', String(flashOver));
         if (flashlightOver) {
@@ -621,10 +621,6 @@ addEventListener('keydown', (e) => {
         flashBeam = !flashBeam;
         localStorage.setItem('mrh-flash-beam', flashBeam ? '1' : '0');
         updateBeamGlow();
-      } else if (settingsCursor === 6) {
-        flashThruFurniture = !flashThruFurniture;
-        localStorage.setItem('mrh-flash-thru', flashThruFurniture ? '1' : '0');
-        if (room.syncLightOccluders) room.syncLightOccluders();
       }
       updateSettingsPanel();
       return;
@@ -662,8 +658,6 @@ const _storedBeam = localStorage.getItem('mrh-flash-beam');
 let flashBeam = _storedBeam === null ? false : _storedBeam === '1';  // beam glow effect on/off
 const _storedGlow = localStorage.getItem('mrh-beam-glow');
 let beamGlowLevel = _storedGlow === null ? 40 : Math.max(0, Math.min(100, +(_storedGlow) || 0));  // beam visibility (0-100%)
-const _storedThru = localStorage.getItem('mrh-flash-thru');
-let flashThruFurniture = _storedThru === null ? false : _storedThru === '1';  // light passes through scene-mesh furniture cubes
 const _storedOver = localStorage.getItem('mrh-flash-over2');
 let flashOver = _storedOver === null ? 10 : Math.max(0, Math.min(100, Math.round(+(_storedOver) || 0)));  // over reach: white core ends at this % of the falloff distance
 let spotGroup = null;        // light receivers: stencil-only redraw of the room/monster, lit per pixel
@@ -681,7 +675,6 @@ let visEyeR = null;          // dedicated camera for the visibility pass (right 
 let casterScene = null;      // depth-pass proxies (separate scene → no recursion into main render)
 let casterMat = null;
 let receiverMat = null;
-let receiverMatThru = null;   // SHINE THRU variant: no "faces the light" gate
 const lightProxies = new Map();  // source mesh → { recv, cast, stamp }
 let proxyStamp = 0;
 let visFrameStamp = 0;
@@ -742,10 +735,6 @@ function readInput() {
             flashBeam = !flashBeam;
             localStorage.setItem('mrh-flash-beam', flashBeam ? '1' : '0');
             updateBeamGlow();
-          } else if (settingsCursor === 6) {
-            flashThruFurniture = !flashThruFurniture;
-            localStorage.setItem('mrh-flash-thru', flashThruFurniture ? '1' : '0');
-            if (room.syncLightOccluders) room.syncLightOccluders();
           }
           updateSettingsPanel();
         }
@@ -759,7 +748,7 @@ function readInput() {
 
           if (stickMoved && settingsStickWasZero) {
             if (Math.abs(stickY) > Math.abs(stickX)) {
-              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(8, settingsCursor + 1);
+              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(7, settingsCursor + 1);
               updateSettingsPanel();
             } else if (settingsCursor === 1) {
               roomBrightness = Math.max(0, Math.min(100, roomBrightness + (stickX > 0 ? 1 : -1)));
@@ -779,12 +768,12 @@ function readInput() {
               flashFade = Math.max(0, Math.min(100, flashFade + (stickX > 0 ? 5 : -5)));
               localStorage.setItem('mrh-flash-fade', String(flashFade));
               updateSettingsPanel();
-            } else if (settingsCursor === 7) {
+            } else if (settingsCursor === 6) {
               beamGlowLevel = Math.max(0, Math.min(100, beamGlowLevel + (stickX > 0 ? 5 : -5)));
               localStorage.setItem('mrh-beam-glow', String(beamGlowLevel));
               updateBeamGlow();
               updateSettingsPanel();
-            } else if (settingsCursor === 8) {
+            } else if (settingsCursor === 7) {
               flashOver = Math.max(0, Math.min(100, flashOver + (stickX > 0 ? 5 : -5)));
               localStorage.setItem('mrh-flash-over2', String(flashOver));
               if (flashlightOver) {
@@ -1207,7 +1196,6 @@ function createFlashlight() {
   // if it is in the cone, in range, faces the flashlight and is not in shadow (depth
   // map rendered from the flashlight each frame). The beam through air is invisible.
   const { vertexShader, fragmentShader } = receiverShaders(FLASH);
-  const thruShaders = receiverShaders(FLASH, { thru: true });
   receiverMat = new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader,
@@ -1225,27 +1213,6 @@ function createFlashlight() {
     depthTest: true,
     side: THREE.DoubleSide,
     polygonOffset: true,                     // win the depth tie with the surface it shadows
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -4,
-    stencilWrite: true,
-    stencilRef: 1,
-    stencilFunc: THREE.AlwaysStencilFunc,
-    stencilZPass: THREE.ReplaceStencilOp,
-    stencilZFail: THREE.KeepStencilOp,
-    stencilFail: THREE.KeepStencilOp
-  });
-  // SHINE THRU FURNITURE variant: same stencil test but NO "faces the light"
-  // gate — furniture cubes write stencil across their whole silhouette so the
-  // wall's visibility (sampled behind them) lights them seamlessly.
-  receiverMatThru = new THREE.ShaderMaterial({
-    vertexShader,
-    fragmentShader: thruShaders.fragmentShader,
-    uniforms: receiverMat.uniforms,          // shared — one per-frame update serves both
-    colorWrite: false,
-    depthWrite: false,
-    depthTest: true,
-    side: THREE.DoubleSide,
-    polygonOffset: true,
     polygonOffsetFactor: -1,
     polygonOffsetUnits: -4,
     stencilWrite: true,
@@ -1596,6 +1563,20 @@ function _roomDims() {
 }
 function _syncProxy(src) {
   if (!src.isMesh || !src.geometry) return;
+  // FURNITURE takes NO part in the flashlight — no shadows, no light, no
+  // stencil, not in the visibility pass. It only visually blocks 3D objects.
+  if (src.userData.__furn === undefined) {
+    if (src.userData.sceneMesh === true) {
+      const bb = new THREE.Box3().setFromObject(src);
+      const rd = _roomDims();
+      const xzMax = Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z);
+      const yExt = bb.max.y - bb.min.y;
+      src.userData.__furn = !(xzMax >= 0.6 * rd.maxDim || yExt >= 0.8 * rd.height);
+    } else {
+      src.userData.__furn = src.userData.isFurniture === true;
+    }
+  }
+  if (src.userData.__furn === true) return;
   let p = lightProxies.get(src);
   if (!p) {
     const recv = new THREE.Mesh(src.geometry, receiverMat);
@@ -1609,31 +1590,13 @@ function _syncProxy(src) {
     spotGroup.add(recv);
     casterScene.add(cast);
     p = { recv, cast, stamp: 0 };
-  // Structure vs furniture: scene meshes that span most of the room (floor,
-  // ceiling, walls) are structure and stay visible in the visibility pass;
-  // compact ones (couch, table…) are furniture — hidden in the vis pass so
-  // their pixels inherit the light of the surface behind them.
-  if (src.userData.sceneMesh === true) {
-    const bb = new THREE.Box3().setFromObject(src);
-    const rd = _roomDims();
-    const xzMax = Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z);
-    const yExt = bb.max.y - bb.min.y;
-    p.isFurn = !(xzMax >= 0.6 * rd.maxDim || yExt >= 0.8 * rd.height);
-  } else {
-    p.isFurn = src.userData.isFurniture === true;
-  }
     lightProxies.set(src, p);
   }
   if (p.recv.geometry !== src.geometry) p.recv.geometry = p.cast.geometry = src.geometry;
   p.stamp = proxyStamp;
   p.recv.matrixWorld.copy(src.matrixWorld);
   p.cast.matrixWorld.copy(src.matrixWorld);
-  // SHINE THRU FURNITURE: scene-mesh furniture cubes RECEIVE the light (their
-  // pixels lose the darkness — the beam reads as passing through them) but
-  // never CAST shadows, so whatever is behind them stays lit.
-  const recvOnly = flashThruFurniture && (src.userData.sceneMesh === true || src.userData.isFurniture === true);
-  p.recv.material = (flashThruFurniture && p.isFurn) ? receiverMatThru : receiverMat;
-  p.cast.visible = _worldVisible(src) && !recvOnly;   // casters: three culls them to the light frustum
+  p.cast.visible = _worldVisible(src);   // casters: three culls them to the light frustum
   // Receivers outside the beam can never light up — skip their draw call entirely.
   p.recv.visible = _worldVisible(src) && _lightFrustum.intersectsObject(p.recv);
 }
@@ -1691,11 +1654,9 @@ function renderFlashlightShadow(r) {
 
   // 2. Mirror the light targets (room occluders + floor + monster) — matrices are fresh here.
   proxyStamp++;
-  // Always sync receivers from the full occluder set. With SHINE THRU FURNITURE,
-  // also sync the wall-only group so the beam collides with just the dynamic
-  // room mesh (furniture cubes then receive light but cast no shadows).
+  // Sync receivers + casters from the full occluder set (furniture is skipped
+  // inside _syncProxy — it takes no part in the flashlight).
   if (room.occluderGroup) room.occluderGroup.traverse(_syncProxy);
-  if (flashThruFurniture && room.lightOccGroup) room.lightOccGroup.traverse(_syncProxy);
   _syncFloorProxies();
   if (monster.root) monster.root.traverse(_syncProxy);
   for (const [src, p] of lightProxies) {
@@ -1746,15 +1707,6 @@ function renderFlashlightShadow(r) {
     }
     r.xr.enabled = false;
     receiverMat.colorWrite = true;
-    // SHINE THRU FURNITURE: hide furniture receivers for the visibility pass —
-    // the wall behind them fills their pixels, so they inherit the wall's light
-    // exactly (no bright seam, no dark rim at their silhouette).
-    const _thruHidden = [];
-    if (flashThruFurniture) {
-      for (const [src, p] of lightProxies) {
-        if (p.recv.visible && p.isFurn) { p.recv.visible = false; _thruHidden.push(p.recv); }
-      }
-    }
     r.setRenderTarget(visRT);
     r.clear(true, true, false);
     r.render(spotGroup, camL);
@@ -1763,7 +1715,6 @@ function renderFlashlightShadow(r) {
       r.clear(true, true, false);
       r.render(spotGroup, camR);
     }
-    for (const m of _thruHidden) m.visible = true;
     r.setRenderTarget(prevTarget);
     r.xr.enabled = xrEnabled;
     receiverMat.colorWrite = false;
@@ -1830,9 +1781,8 @@ function updateSettingsPanel() {
     { text: 'FLASH FALLOFF: ' + flashFalloffFt + ' FT', y: 234 },
     { text: 'FLASH FADE: ' + flashFade + '%', y: 292 },
     { text: 'BEAM: ' + (flashBeam ? 'ON' : 'OFF'), y: 350 },
-    { text: 'SHINE THRU FURNITURE: ' + (flashThruFurniture ? 'ON' : 'OFF'), y: 408 },
-    { text: 'BEAM GLOW: ' + beamGlowLevel + '%', y: 466 },
-    { text: 'FLASH OVER: ' + flashOver + '%', y: 524 }
+    { text: 'BEAM GLOW: ' + beamGlowLevel + '%', y: 408 },
+    { text: 'FLASH OVER: ' + flashOver + '%', y: 466 }
   ];
   ctx.textBaseline = 'middle';
   for (let i = 0; i < rows.length; i++) {

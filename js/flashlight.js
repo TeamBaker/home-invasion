@@ -88,8 +88,7 @@ export function isLit(p, n, eye, light, sampleDepth, cfg = FLASH) {
 const f = (x) => (Number.isInteger(x) ? x.toFixed(1) : String(x));
 
 /** GLSL for the receiver (stencil-writing) material — same predicate as isLit(). */
-export function receiverShaders(cfg = FLASH, opts = {}) {
-  const thru = opts.thru === true;
+export function receiverShaders(cfg = FLASH) {
   const vertexShader = /* glsl */ `
     varying vec3 vWorld;
     void main() {
@@ -97,7 +96,6 @@ export function receiverShaders(cfg = FLASH, opts = {}) {
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }`;
   const fragmentShader = /* glsl */ `
-    ${thru ? '#define THRU 1' : ''}
     uniform vec3 uLightPos;
     uniform vec3 uLightDir;
     uniform mat4 uLightVP;
@@ -106,8 +104,6 @@ export function receiverShaders(cfg = FLASH, opts = {}) {
     const float RANGE = ${f(cfg.range)};
     const float NEAR = ${f(cfg.near)};
     const float CONE_COS = ${coneCos(cfg).toFixed(6)};
-    const float NDOTL_MIN = ${f(cfg.ndotlMin)};
-    const float FACE_FADE_END = ${f(cfg.faceFadeEnd)};
     const float BIAS_CONST = ${f(cfg.biasConst)};
     const float BIAS_SLOPE = ${(cfg.biasSlopeTexels * texelScale(cfg)).toExponential(6)};
     const float MAX_SLOPE = ${f(cfg.maxSlope)};
@@ -143,13 +139,7 @@ export function receiverShaders(cfg = FLASH, opts = {}) {
       vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
       if (dot(N, cameraPosition - vWorld) < 0.0) N = -N;
       float ndl = dot(N, L);
-      // Smooth grazing fade: faces angled away from the beam ramp down to dark
-      // across FACE_FADE_END of N·L instead of a hard cutoff at NDOTL_MIN.
-      #ifndef THRU
       if (ndl <= 0.0) discard;
-      shape *= smoothstep(0.0, FACE_FADE_END, ndl);
-      visibility = falloffFactor * shape;
-      #endif
       vec4 lc = uLightVP * vec4(vWorld, 1.0);
       vec2 uv = lc.xy / lc.w * 0.5 + 0.5;
       float occ = linZ(texture2D(uShadow, uv).r);
