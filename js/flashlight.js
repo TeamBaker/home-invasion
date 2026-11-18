@@ -112,6 +112,7 @@ export function receiverShaders(cfg = FLASH, opts = {}) {
     const float BIAS_SLOPE = ${(cfg.biasSlopeTexels * texelScale(cfg)).toExponential(6)};
     const float MAX_SLOPE = ${f(cfg.maxSlope)};
     uniform float uDist;
+    uniform float uOverReach;
     uniform float uFade;
     float linZ(float z) {
       float ndc = z * 2.0 - 1.0;
@@ -133,6 +134,7 @@ export function receiverShaders(cfg = FLASH, opts = {}) {
       
       // Combine falloff and fade
       float visibility = falloffFactor * fadeFactor;
+      float shape = fadeFactor;
       
       if (visibility <= 0.0 || d > RANGE || coneDot < CONE_COS - 0.2) discard;
       
@@ -145,7 +147,8 @@ export function receiverShaders(cfg = FLASH, opts = {}) {
       // across FACE_FADE_END of N·L instead of a hard cutoff at NDOTL_MIN.
       #ifndef THRU
       if (ndl <= 0.0) discard;
-      visibility *= smoothstep(0.0, FACE_FADE_END, ndl);
+      shape *= smoothstep(0.0, FACE_FADE_END, ndl);
+      visibility = falloffFactor * shape;
       #endif
       vec4 lc = uLightVP * vec4(vWorld, 1.0);
       vec2 uv = lc.xy / lc.w * 0.5 + 0.5;
@@ -153,8 +156,12 @@ export function receiverShaders(cfg = FLASH, opts = {}) {
       float tanT = min(sqrt(max(1.0 - ndl * ndl, 0.0)) / ndl, MAX_SLOPE);
       if (lc.w - occ > BIAS_CONST + BIAS_SLOPE * lc.w * tanT) discard;
       
-      // Write visibility to alpha channel for use in darkness overlay
-      gl_FragColor = vec4(0.0, 0.0, 0.0, visibility);
+      // G = over-bright amount: the beam's FULL shape (cone edge + fade + N·L,
+      // same dimensions as the main light) scaled by the FLASH OVER linear reach
+      // (white at the lamp, zero at uOverReach). A = full visibility (with the
+      // distance falloff) for the darkness removal.
+      float overShape = shape * clamp(1.0 - d / uOverReach, 0.0, 1.0) * step(0.0001, uOverReach);
+      gl_FragColor = vec4(0.0, overShape, 0.0, visibility);
     }`;
   return { vertexShader, fragmentShader };
 }

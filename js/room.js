@@ -210,6 +210,7 @@ export class RoomSense {
         ? new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false }).rotateX(-Math.PI / 2).translate(0, -h, 0)
         : new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2);
       rec.occ = this._addOcc(geo, rec.matrix);
+      if (rec.kind === 'solid') rec.occ.userData.isFurniture = true;   // furniture plane (couch/table…)
       rec.occFloor = floorY;
     }
     this._syncLightOccluders();

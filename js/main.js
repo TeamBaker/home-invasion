@@ -609,7 +609,6 @@ addEventListener('keydown', (e) => {
         flashOver = Math.max(0, Math.min(100, flashOver + (e.code === 'ArrowRight' ? 5 : -5)));
         localStorage.setItem('mrh-flash-over2', String(flashOver));
         if (flashlightOver) {
-          flashlightOver.material.uniforms.uOverInv.value = flashOver > 0 ? 100 / flashOver : 0;
           flashlightOver.visible = flashlightMode && flashOver > 0;
         }
         updateSettingsPanel();
@@ -789,7 +788,6 @@ function readInput() {
               flashOver = Math.max(0, Math.min(100, flashOver + (stickX > 0 ? 5 : -5)));
               localStorage.setItem('mrh-flash-over2', String(flashOver));
               if (flashlightOver) {
-                flashlightOver.material.uniforms.uOverInv.value = flashOver > 0 ? 100 / flashOver : 0;
                 flashlightOver.visible = flashlightMode && flashOver > 0;
               }
               updateSettingsPanel();
@@ -1219,6 +1217,7 @@ function createFlashlight() {
       uLightVP: { value: new THREE.Matrix4() },
       uShadow: { value: null },
       uDist: { value: 20 * 0.3048 },
+      uOverReach: { value: (flashOver / 100) * flashFalloffFt * 0.3048 },
       uFade: { value: 0.3 },
     },
     colorWrite: false,
@@ -1337,7 +1336,6 @@ function createFlashlight() {
         if (visRT2) uOver.uVisTex2.value = visRT2.texture;
         uOver.uHalfW.value = r.xr.isPresenting ? r.domElement.width / 2 : r.domElement.width;
         uOver.uBufH.value = r.domElement.height;
-        uOver.uOverInv.value = flashOver > 0 ? 100 / flashOver : 0;
       }
     }
   };
@@ -1432,9 +1430,11 @@ function createFlashlight() {
   coneDarkness.visible = false;
   camera.add(coneDarkness);
 
-  // Over-bright pass: pure white added inside the beam, ON TOP of everything —
-  // completely white at the flashlight, fading LINEARLY to zero at FLASH OVER%
-  // of the falloff distance (10% of 20 ft = the white core ends at 2 ft).
+  // Over-bright pass: pure white added inside the beam, ON TOP of everything.
+  // Uses the beam's FULL shape (cone edge, fade, shadows — same dimensions as
+  // the main light), scaled by a linear reach: white at the flashlight, zero at
+  // FLASH OVER% of the falloff distance. The vis pass bakes that into the
+  // GREEN channel every frame; this pass just adds it where the stencil allows.
   flashlightOver = new THREE.Mesh(
     new THREE.PlaneGeometry(20, 20),
     new THREE.ShaderMaterial({
@@ -1444,13 +1444,11 @@ function createFlashlight() {
         uniform sampler2D uVisTex2;
         uniform float uHalfW;
         uniform float uBufH;
-        uniform float uOverInv;
         varying vec2 vUv;
         void main() {
           vec2 uv = vec2(mod(gl_FragCoord.x, uHalfW), gl_FragCoord.y) / vec2(uHalfW, uBufH);
           float isRight = step(uHalfW, gl_FragCoord.x);
-          float visibility = mix(texture2D(uVisTex, uv).a, texture2D(uVisTex2, uv).a, isRight);
-          float overAmt = clamp(1.0 - (1.0 - visibility) * uOverInv, 0.0, 1.0) * step(0.0001, uOverInv);
+          float overAmt = mix(texture2D(uVisTex, uv).g, texture2D(uVisTex2, uv).g, isRight);
           gl_FragColor = vec4(vec3(1.0), overAmt);
         }
       `,
@@ -1458,8 +1456,7 @@ function createFlashlight() {
         uVisTex: { value: null },
         uVisTex2: { value: null },
         uHalfW: { value: 512 },
-        uBufH: { value: 512 },
-        uOverInv: { value: flashOver > 0 ? 100 / flashOver : 0 }
+        uBufH: { value: 512 }
       },
       transparent: true,
       depthTest: false,
@@ -1573,6 +1570,30 @@ function _worldVisible(o) {
   for (; o; o = o.parent) if (!o.visible) return false;
   return true;
 }
+// Room footprint + height from the classified planes (cached). Used to tell
+// structure (floor/ceiling/walls — they span the room) apart from furniture
+// (compact objects like a couch or table).
+let _roomDimsCache = null;
+function _roomDims() {
+  if (_roomDimsCache) return _roomDimsCache;
+  let maxDim = 6, height = 2.5;
+  const m = new THREE.Matrix4(), v = new THREE.Vector3();
+  for (const rec of room.model.planes.values()) {
+    if (rec.kind === 'floor' && rec.polygon && rec.matrix) {
+      let minx = 1e9, maxx = -1e9, minz = 1e9, maxz = -1e9;
+      m.fromArray(rec.matrix);
+      for (const pt of rec.polygon) {
+        v.set(pt.x, pt.y, pt.z).applyMatrix4(m);
+        minx = Math.min(minx, v.x); maxx = Math.max(maxx, v.x);
+        minz = Math.min(minz, v.z); maxz = Math.max(maxz, v.z);
+      }
+      maxDim = Math.max(maxDim, maxx - minx, maxz - minz, 1);
+    }
+    if (rec.kind === 'ceiling' && typeof rec.y === 'number') height = Math.max(height, rec.y - (room.floorY || 0));
+  }
+  _roomDimsCache = { maxDim, height };
+  return _roomDimsCache;
+}
 function _syncProxy(src) {
   if (!src.isMesh || !src.geometry) return;
   let p = lightProxies.get(src);
@@ -1588,6 +1609,19 @@ function _syncProxy(src) {
     spotGroup.add(recv);
     casterScene.add(cast);
     p = { recv, cast, stamp: 0 };
+  // Structure vs furniture: scene meshes that span most of the room (floor,
+  // ceiling, walls) are structure and stay visible in the visibility pass;
+  // compact ones (couch, table…) are furniture — hidden in the vis pass so
+  // their pixels inherit the light of the surface behind them.
+  if (src.userData.sceneMesh === true) {
+    const bb = new THREE.Box3().setFromObject(src);
+    const rd = _roomDims();
+    const xzMax = Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z);
+    const yExt = bb.max.y - bb.min.y;
+    p.isFurn = !(xzMax >= 0.6 * rd.maxDim || yExt >= 0.8 * rd.height);
+  } else {
+    p.isFurn = src.userData.isFurniture === true;
+  }
     lightProxies.set(src, p);
   }
   if (p.recv.geometry !== src.geometry) p.recv.geometry = p.cast.geometry = src.geometry;
@@ -1597,8 +1631,8 @@ function _syncProxy(src) {
   // SHINE THRU FURNITURE: scene-mesh furniture cubes RECEIVE the light (their
   // pixels lose the darkness — the beam reads as passing through them) but
   // never CAST shadows, so whatever is behind them stays lit.
-  const recvOnly = flashThruFurniture && src.userData.sceneMesh === true;
-  p.recv.material = recvOnly ? receiverMatThru : receiverMat;
+  const recvOnly = flashThruFurniture && (src.userData.sceneMesh === true || src.userData.isFurniture === true);
+  p.recv.material = (flashThruFurniture && p.isFurn) ? receiverMatThru : receiverMat;
   p.cast.visible = _worldVisible(src) && !recvOnly;   // casters: three culls them to the light frustum
   // Receivers outside the beam can never light up — skip their draw call entirely.
   p.recv.visible = _worldVisible(src) && _lightFrustum.intersectsObject(p.recv);
@@ -1651,6 +1685,7 @@ function renderFlashlightShadow(r) {
   u.uLightDir.value.set(0, 0, -1).applyQuaternion(lightCam.quaternion);
   u.uLightVP.value.multiplyMatrices(lightCam.projectionMatrix, lightCam.matrixWorldInverse);
   u.uDist.value = flashFalloffFt * 0.3048;
+  u.uOverReach.value = (flashOver / 100) * flashFalloffFt * 0.3048;
   u.uFade.value = flashFade / 100;
   _lightFrustum.setFromProjectionMatrix(u.uLightVP.value);
 
@@ -1717,7 +1752,7 @@ function renderFlashlightShadow(r) {
     const _thruHidden = [];
     if (flashThruFurniture) {
       for (const [src, p] of lightProxies) {
-        if (p.recv.visible && src.userData.sceneMesh === true) { p.recv.visible = false; _thruHidden.push(p.recv); }
+        if (p.recv.visible && p.isFurn) { p.recv.visible = false; _thruHidden.push(p.recv); }
       }
     }
     r.setRenderTarget(visRT);
