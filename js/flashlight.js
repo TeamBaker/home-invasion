@@ -20,7 +20,6 @@ export const FLASH = {
   fovMargin: 4,           // degrees added to the shadow frustum so the cone edge never clips
   ndotlMin: 0.05,         // surfaces more grazing than ~87° to the beam stay dark (CPU bool twin)
   faceFadeEnd: 0.55,      // grazing faces fade smoothly to dark across this N·L range (shader only)
-  falloffSpan: 0.55,      // fraction of RANGE over which FALLOFF completes — punchier distance falloff
   biasConst: 0.004,       // metres of constant depth bias
   biasSlopeTexels: 1.5,   // slope-scaled bias, in shadow-map texels
   maxSlope: 8,            // clamp on tan(incidence) for the slope bias
@@ -107,7 +106,6 @@ export function receiverShaders(cfg = FLASH) {
     const float CONE_COS = ${coneCos(cfg).toFixed(6)};
     const float NDOTL_MIN = ${f(cfg.ndotlMin)};
     const float FACE_FADE_END = ${f(cfg.faceFadeEnd)};
-    const float FALLOFF_SPAN = ${f(cfg.falloffSpan)};
     const float BIAS_CONST = ${f(cfg.biasConst)};
     const float BIAS_SLOPE = ${(cfg.biasSlopeTexels * texelScale(cfg)).toExponential(6)};
     const float MAX_SLOPE = ${f(cfg.maxSlope)};
@@ -123,10 +121,11 @@ export function receiverShaders(cfg = FLASH) {
       vec3 L = toL / d;
       
       // Calculate distance falloff factor (0-1)
-      float falloffFactor = 1.0 - smoothstep(0.0, RANGE * FALLOFF_SPAN, d) * uFalloff;
-      // Keep falling past the span instead of plateauing, so distance falloff
-      // keeps shaping the light (and FLASH OVER) all the way to RANGE.
-      falloffFactor *= 1.0 - uFalloff * smoothstep(RANGE * FALLOFF_SPAN, RANGE, d);
+      // Distance attenuation: (1 - d/RANGE)^k with k driven by the FALLOFF
+      // slider (0 = no falloff, 1 = very steep). Falls smoothly to zero AT
+      // max range — no plateau, no hard cut. FLASH OVER inherits this curve
+      // through the visibility alpha.
+      float falloffFactor = pow(1.0 - min(d / RANGE, 1.0), uFalloff * 4.0);
       
       // Calculate cone edge fade factor (0-1)
       float coneDot = dot(-L, uLightDir);

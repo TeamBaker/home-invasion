@@ -1479,6 +1479,7 @@ function updateBeamGlow() {
       })
     );
     beamGlow.visible = false;
+    beamGlow.renderOrder = 2005;   // draw AFTER the darkness passes — else the darkness overlay paints over the beam
     flashlightModel.add(beamGlow);
   }
   
@@ -1563,9 +1564,13 @@ function _syncProxy(src) {
   p.stamp = proxyStamp;
   p.recv.matrixWorld.copy(src.matrixWorld);
   p.cast.matrixWorld.copy(src.matrixWorld);
-  p.cast.visible = _worldVisible(src);       // casters: three culls them to the light frustum
+  // SHINE THRU FURNITURE: scene-mesh furniture cubes RECEIVE the light (their
+  // pixels lose the darkness — the beam reads as passing through them) but
+  // never CAST shadows, so whatever is behind them stays lit.
+  const recvOnly = flashThruFurniture && src.userData.sceneMesh === true;
+  p.cast.visible = _worldVisible(src) && !recvOnly;   // casters: three culls them to the light frustum
   // Receivers outside the beam can never light up — skip their draw call entirely.
-  p.recv.visible = p.cast.visible && _lightFrustum.intersectsObject(p.recv);
+  p.recv.visible = _worldVisible(src) && _lightFrustum.intersectsObject(p.recv);
 }
 
 // The room's depth occluders cover walls + furniture but not the floor (plane fallback:
@@ -1620,10 +1625,11 @@ function renderFlashlightShadow(r) {
 
   // 2. Mirror the light targets (room occluders + floor + monster) — matrices are fresh here.
   proxyStamp++;
-  // SHINE THRU FURNITURE: cast against ONLY the classified dynamic room mesh
-  // (walls + furniture tops) — scene-mesh cubes are ignored by the beam entirely.
-  const occRoot = flashThruFurniture && room.lightOccGroup ? room.lightOccGroup : room.occluderGroup;
-  if (occRoot) occRoot.traverse(_syncProxy);
+  // Always sync receivers from the full occluder set. With SHINE THRU FURNITURE,
+  // also sync the wall-only group so the beam collides with just the dynamic
+  // room mesh (furniture cubes then receive light but cast no shadows).
+  if (room.occluderGroup) room.occluderGroup.traverse(_syncProxy);
+  if (flashThruFurniture && room.lightOccGroup) room.lightOccGroup.traverse(_syncProxy);
   _syncFloorProxies();
   if (monster.root) monster.root.traverse(_syncProxy);
   for (const [src, p] of lightProxies) {

@@ -195,6 +195,7 @@ export class RoomSense {
       geo.setIndex(new THREE.BufferAttribute(rec.indices, 1));
       const occ = this._addOcc(geo, rec.matrix);
       occ.userData.key = key;
+      occ.userData.sceneMesh = true;   // scene-mesh occluder (furniture cubes etc.)
       this.meshOcc.set(rec, occ);
     }
     const usePlanes = this.meshOcc.size === 0;
