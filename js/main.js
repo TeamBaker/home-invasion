@@ -1005,7 +1005,7 @@ function loop(time, frame) {
   stateTime += dt;
 
   // Room sensing: pull detected planes/meshes, rebuild the nav grid when they change.
-  if (frame && renderer.xr.isPresenting) {
+  if (frame && renderer.xr.isPresenting && !window.__fakeXR) {
     xrTime += dt;
     room.updateXR(frame, renderer.xr.getReferenceSpace());
     // Quest: if the user never ran Space Setup there is nothing to detect — offer it once.
@@ -1051,6 +1051,7 @@ function loop(time, frame) {
   pendingTrigger = false;
 
   hud.update(dt);
+  if (window.__dbgTick) window.__dbgTick(dt);
   renderer.render(scene, camera);
 }
 renderer.setAnimationLoop(loop);
@@ -1257,8 +1258,14 @@ function createFlashlight() {
         const uniforms = coneDarkness.material.uniforms;
         uniforms.uVisTex.value = visRT.texture;
         if (visRT2) uniforms.uVisTex2.value = visRT2.texture;
-        uniforms.uHalfW.value = r.xr.isPresenting ? r.drawingBufferWidth / 2 : r.drawingBufferWidth;
-        uniforms.uBufH.value = r.drawingBufferHeight;
+        // three r170 has no renderer.drawingBufferWidth/Height (undefined -> NaN
+        // uniforms -> the cone-darkness shader sampled the visibility map at NaN
+        // and re-covered the flashlight spot with full darkness on every platform).
+        // The canvas backing store IS the buffer we render into: on desktop it is
+        // the drawing buffer, and WebXRManager.setSize() resizes it to the full
+        // side-by-side XR texture (both eyes) at session start.
+        uniforms.uHalfW.value = r.xr.isPresenting ? r.domElement.width / 2 : r.domElement.width;
+        uniforms.uBufH.value = r.domElement.height;
       }
     }
   };
@@ -1686,3 +1693,114 @@ function toggleSettingsPanel() {
 
 // Debug handle for console-driven verification (renderer + visibility RTs).
 window.__hi_dbg = { r: renderer, vis: () => [visRT, visRT2], eyeCams: () => [visEyeL, visEyeR] };
+
+// ── ?fakexr=1: desktop XR simulation — exercises the per-eye vis branch locally ──
+const __dbgParams = new URLSearchParams(location.search);
+if (__dbgParams.has('fakexr')) {
+  const fakeSubL = new THREE.PerspectiveCamera();
+  const fakeSubR = new THREE.PerspectiveCamera();
+  fakeSubL.viewport = new THREE.Vector4();
+  fakeSubR.viewport = new THREE.Vector4();
+  const fakeXR = new THREE.ArrayCamera([fakeSubL, fakeSubR]);
+  const _fRight = new THREE.Vector3();
+  function __syncFakeXR() {
+    camera.updateMatrixWorld(true);
+    const W = renderer.domElement.width, H = renderer.domElement.height;
+    fakeSubL.viewport.set(0, 0, W / 2, H);
+    fakeSubR.viewport.set(W / 2, 0, W / 2, H);
+    fakeSubL.projectionMatrix.copy(camera.projectionMatrix);
+    fakeSubR.projectionMatrix.copy(camera.projectionMatrix);
+    fakeXR.projectionMatrix.copy(camera.projectionMatrix);
+    fakeXR.matrixWorld.copy(camera.matrixWorld);
+    fakeXR.matrixWorldInverse.copy(camera.matrixWorldInverse);
+    for (const pair of [[fakeSubL, -0.032], [fakeSubR, 0.032]]) {
+      const sub = pair[0], dx = pair[1];
+      sub.matrixWorld.copy(camera.matrixWorld);
+      _fRight.setFromMatrixColumn(camera.matrixWorld, 0);
+      sub.matrixWorld.elements[12] += _fRight.x * dx;
+      sub.matrixWorld.elements[13] += _fRight.y * dx;
+      sub.matrixWorld.elements[14] += _fRight.z * dx;
+      sub.matrixWorldInverse.copy(sub.matrixWorld).invert();
+    }
+  }
+  renderer.xr.isPresenting = true;
+  renderer.xr.getCamera = function () { __syncFakeXR(); return fakeXR; };
+  window.__fakeXR = true;
+}
+
+// ── ?dbg=1: flashlight diagnostics panel + visibility thumbnails ──
+if (__dbgParams.has('dbg')) {
+  const dCan = document.createElement('canvas');
+  dCan.width = 512; dCan.height = 300;
+  const dCtx = dCan.getContext('2d');
+  const dTex = new THREE.CanvasTexture(dCan);
+  const dPanel = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.62, 0.363),
+    new THREE.MeshBasicMaterial({ map: dTex, transparent: true, depthTest: false, depthWrite: false })
+  );
+  dPanel.renderOrder = 3500;
+  dPanel.position.set(0, 0.5, -1.05);
+  camera.add(dPanel);
+  const mkThumb = (tex, x) => {
+    const q = new THREE.Mesh(new THREE.PlaneGeometry(0.24, 0.24),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false }));
+    q.renderOrder = 3501;
+    q.position.set(x, 0.2, -0.9);
+    camera.add(q);
+    return q;
+  };
+  let tL = null, tR = null;
+  const readBuf = new Uint8Array(1024 * 1024 * 4);
+  const stats = { nzL: -1, maxL: -1, nzR: -1, maxR: -1 };
+  let lastRead = 0, lastText = 0;
+  const mPos = (m) => [m.elements[12], m.elements[13], m.elements[14]].map(v => v.toFixed(2)).join(',');
+  function __dbgCount(rt, which) {
+    renderer.readRenderTargetPixels(rt, 0, 0, 1024, 1024, readBuf);
+    let nz = 0, mx = 0;
+    for (let i = 3; i < readBuf.length; i += 4) {
+      const a = readBuf[i];
+      if (a > 8) { nz++; if (a > mx) mx = a; }
+    }
+    if (which === 0) { stats.nzL = nz; stats.maxL = mx; } else { stats.nzR = nz; stats.maxR = mx; }
+  }
+  window.__dbgTick = function () {
+    const now = performance.now();
+    if (!tL && visRT) {
+      tL = mkThumb(visRT.texture, -0.42);
+      if (visRT2) tR = mkThumb(visRT2.texture, 0.42);
+    }
+    if (now - lastRead > 1000 && visRT) {
+      lastRead = now;
+      __dbgCount(visRT, 0);
+      if (visRT2) __dbgCount(visRT2, 1);
+    }
+    if (now - lastText > 250) {
+      lastText = now;
+      const u = coneDarkness && coneDarkness.material.uniforms;
+      const subs = renderer.xr.getCamera ? renderer.xr.getCamera().cameras : [];
+      const ok = stats.nzL > 5000;
+      dCtx.clearRect(0, 0, 512, 300);
+      dCtx.fillStyle = 'rgba(0,0,0,0.75)';
+      dCtx.fillRect(0, 0, 512, 300);
+      dCtx.fillStyle = ok ? '#00ff88' : '#ff4444';
+      dCtx.font = 'bold 26px monospace';
+      dCtx.fillText(ok ? 'VIS RT: OK' : 'VIS RT: EMPTY', 14, 30);
+      dCtx.fillStyle = '#ffffff';
+      dCtx.font = '15px monospace';
+      const lines = [
+        'presenting=' + renderer.xr.isPresenting + ' fake=' + !!window.__fakeXR + ' subs=' + subs.length,
+        'buf=' + renderer.domElement.width + 'x' + renderer.domElement.height +
+          ' uHalfW=' + (u ? u.uHalfW.value.toFixed(0) : '?') + ' uBufH=' + (u ? u.uBufH.value.toFixed(0) : '?'),
+        'visL nz=' + stats.nzL + ' max=' + stats.maxL + '  visR nz=' + stats.nzR + ' max=' + stats.maxR,
+        'eyeL=' + (visEyeL ? mPos(visEyeL.matrixWorld) : '?'),
+        'eyeR=' + (visEyeR ? mPos(visEyeR.matrixWorld) : '?'),
+        'light=' + (flashlightModel ? mPos(flashlightModel.matrixWorld) : '?'),
+        'bright=' + roomBrightness + ' mask=' + maskStrength +
+          ' falloff=' + flashFalloff + ' fade=' + flashFade
+      ];
+      for (let i = 0; i < lines.length; i++) dCtx.fillText(lines[i], 14, 58 + i * 22);
+      dTex.needsUpdate = true;
+    }
+  };
+  dPanel.visible = true;
+}
