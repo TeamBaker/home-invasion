@@ -625,6 +625,7 @@ addEventListener('keydown', (e) => {
       } else if (settingsCursor === 6) {
         flashThruFurniture = !flashThruFurniture;
         localStorage.setItem('mrh-flash-thru', flashThruFurniture ? '1' : '0');
+        if (room.syncLightOccluders) room.syncLightOccluders();
       }
       updateSettingsPanel();
       return;
@@ -744,6 +745,7 @@ function readInput() {
           } else if (settingsCursor === 6) {
             flashThruFurniture = !flashThruFurniture;
             localStorage.setItem('mrh-flash-thru', flashThruFurniture ? '1' : '0');
+            if (room.syncLightOccluders) room.syncLightOccluders();
           }
           updateSettingsPanel();
         }
@@ -1461,7 +1463,7 @@ function updateBeamGlow() {
     // Create beam glow effect
     const length = FLASH.range * 0.6;
     const radius = length * Math.tan(FLASH.coneAngle / 2);
-    const beamGeom = new THREE.ConeGeometry(radius, length, 8);
+    const beamGeom = new THREE.ConeGeometry(radius, length, 16);
     beamGeom.translate(0, -length / 2, 0);
     beamGeom.rotateX(Math.PI / 2);
     
@@ -1473,7 +1475,7 @@ function updateBeamGlow() {
         opacity: 0.15,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
-        side: THREE.BackSide
+        side: THREE.DoubleSide
       })
     );
     beamGlow.visible = false;
@@ -1482,7 +1484,7 @@ function updateBeamGlow() {
   
   if (beamGlow) {
     beamGlow.visible = flashBeam && flashlightMode;
-    beamGlow.material.opacity = (beamGlowLevel / 100) * 0.4;   // BEAM GLOW setting
+    beamGlow.material.opacity = (beamGlowLevel / 100) * 0.9;   // BEAM GLOW setting (must read over bright passthrough)
   }
 }
 

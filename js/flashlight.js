@@ -124,6 +124,9 @@ export function receiverShaders(cfg = FLASH) {
       
       // Calculate distance falloff factor (0-1)
       float falloffFactor = 1.0 - smoothstep(0.0, RANGE * FALLOFF_SPAN, d) * uFalloff;
+      // Keep falling past the span instead of plateauing, so distance falloff
+      // keeps shaping the light (and FLASH OVER) all the way to RANGE.
+      falloffFactor *= 1.0 - uFalloff * smoothstep(RANGE * FALLOFF_SPAN, RANGE, d);
       
       // Calculate cone edge fade factor (0-1)
       float coneDot = dot(-L, uLightDir);

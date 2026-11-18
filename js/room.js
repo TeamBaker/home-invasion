@@ -211,18 +211,20 @@ export class RoomSense {
       rec.occ = this._addOcc(geo, rec.matrix);
       rec.occFloor = floorY;
     }
-    // Light-only occluders: the classified dynamic room mesh (walls + furniture
-    // tops). Built for every classified plane regardless of scene meshes, so the
-    // flashlight can cast against ONLY these (SHINE THRU FURNITURE).
+    this._syncLightOccluders();
+  }
+
+  // Light-only occluders: WALLS only. SHINE THRU FURNITURE means the beam
+  // ignores furniture entirely — scene-mesh cubes AND solid planes — so the
+  // light passes through it and lands on the wall behind.
+  _syncLightOccluders() {
+    const floorY = this.floorY;
     for (const rec of this.model.planes.values()) {
-      const want = rec.kind === 'wall' || rec.kind === 'solid';
+      const want = rec.kind === 'wall';
       if (rec.locc && (!want || rec.loccFloor !== floorY)) { this._dropLightOcc(rec.locc); rec.locc = null; }
       if (!want || rec.locc) continue;
       const shape = new THREE.Shape(rec.polygon.map((p) => new THREE.Vector2(p.x, -p.z)));
-      const h = rec.y - floorY;
-      const geo = rec.kind === 'solid' && h > 0.05
-        ? new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false }).rotateX(-Math.PI / 2).translate(0, -h, 0)
-        : new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2);
+      const geo = new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2);
       rec.locc = this._addOcc(geo, rec.matrix, this.lightOccGroup);
       rec.loccFloor = floorY;
     }
