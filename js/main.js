@@ -577,7 +577,7 @@ addEventListener('keydown', (e) => {
   // While the panel is open, arrows/Enter drive the panel instead of the game.
   if (settingsPanelOpen) {
     if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
-      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 10);
+      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 11);
       updateSettingsPanel();
       return;
     }
@@ -615,6 +615,10 @@ addEventListener('keydown', (e) => {
       } else if (settingsCursor === 9) {
         lightBlur = Math.max(0, Math.min(8, lightBlur + (e.code === 'ArrowRight' ? 1 : -1)));
         localStorage.setItem('mrh-light-blur', String(lightBlur));
+        updateSettingsPanel();
+      } else if (settingsCursor === 11) {
+        blurDistFt = Math.max(1, Math.min(39, blurDistFt + (e.code === 'ArrowRight' ? 1 : -1)));
+        localStorage.setItem('mrh-blur-dist', String(blurDistFt));
         updateSettingsPanel();
       }
       return;
@@ -672,6 +676,8 @@ const _storedBlur = localStorage.getItem('mrh-light-blur');
 let lightBlur = _storedBlur === null ? 6 : Math.max(0, Math.min(8, Math.round(+(_storedBlur) || 6)));  // Gaussian blur strength for the vis field: higher = softer lit/unlit transition
 const _storedBlurDyn = localStorage.getItem('mrh-blur-dyn');
 let blurDynOnly = _storedBlurDyn === null ? true : _storedBlurDyn === '1';  // ON: the blur only softens the dynamic mesh (furniture); OFF: it softens everything
+const _storedBlurDist = localStorage.getItem('mrh-blur-dist');
+let blurDistFt = _storedBlurDist === null ? 20 : Math.max(1, Math.min(39, Math.round(+(_storedBlurDist) || 20)));  // BLUR DISTANCE: blur fades to zero at this distance from the flashlight (feet)
 const _storedGlow = localStorage.getItem('mrh-beam-glow');
 let beamGlowLevel = _storedGlow === null ? 40 : Math.max(0, Math.min(100, +(_storedGlow) || 0));  // beam visibility (0-100%)
 const _storedOver = localStorage.getItem('mrh-flash-over2');
@@ -779,7 +785,7 @@ function readInput() {
 
           if (stickMoved && settingsStickWasZero) {
             if (Math.abs(stickY) > Math.abs(stickX)) {
-              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(10, settingsCursor + 1);
+              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(11, settingsCursor + 1);
               updateSettingsPanel();
             } else if (settingsCursor === 1) {
               roomBrightness = Math.max(0, Math.min(100, roomBrightness + (stickX > 0 ? 1 : -1)));
@@ -814,6 +820,10 @@ function readInput() {
             } else if (settingsCursor === 9) {
               lightBlur = Math.max(0, Math.min(8, lightBlur + (stickX > 0 ? 1 : -1)));
               localStorage.setItem('mrh-light-blur', String(lightBlur));
+              updateSettingsPanel();
+            } else if (settingsCursor === 11) {
+              blurDistFt = Math.max(1, Math.min(39, blurDistFt + (stickX > 0 ? 1 : -1)));
+              localStorage.setItem('mrh-blur-dist', String(blurDistFt));
               updateSettingsPanel();
             }
             settingsStickWasZero = false;
@@ -1400,6 +1410,7 @@ function createFlashlight() {
         uniforms.uVisBlurTex.value = lightBlur > 0 ? visBlurRT.texture : visRT.texture;
         if (visRT2) uniforms.uVisBlurTex2.value = lightBlur > 0 ? visBlurRT2.texture : visRT2.texture;
         uniforms.uDynOnly.value = blurDynOnly ? 1 : 0;
+        uniforms.uBlurDist.value = Math.min(1, (blurDistFt * 0.3048) / FLASH.range);
         // three r170 has no renderer.drawingBufferWidth/Height (undefined -> NaN
         // uniforms -> the cone-darkness shader sampled the visibility map at NaN
         // and re-covered the flashlight spot with full darkness on every platform).
@@ -1416,6 +1427,7 @@ function createFlashlight() {
         uOver.uVisBlurTex.value = lightBlur > 0 ? visBlurRT.texture : visRT.texture;
         if (visRT2) uOver.uVisBlurTex2.value = lightBlur > 0 ? visBlurRT2.texture : visRT2.texture;
         uOver.uDynOnly.value = blurDynOnly ? 1 : 0;
+        uOver.uBlurDist.value = Math.min(1, (blurDistFt * 0.3048) / FLASH.range);
         uOver.uHalfW.value = r.xr.isPresenting ? r.domElement.width / 2 : r.domElement.width;
         uOver.uBufH.value = r.domElement.height;
         uOver.uMaskStrength.value = maskStrength;
@@ -1466,6 +1478,7 @@ function createFlashlight() {
       uniform sampler2D uVisBlurTex;
       uniform sampler2D uVisBlurTex2;
       uniform float uDynOnly;
+      uniform float uBlurDist;
       uniform float uHalfW;
       uniform float uBufH;
       varying vec2 vUv;
@@ -1477,7 +1490,8 @@ function createFlashlight() {
         float isRight = step(uHalfW, gl_FragCoord.x);
         vec4 vis = mix(texture2D(uVisTex, uv), texture2D(uVisTex2, uv), isRight);
         vec4 blur = mix(texture2D(uVisBlurTex, uv), texture2D(uVisBlurTex2, uv), isRight);
-        float classM = max(vis.b, 1.0 - uDynOnly);
+        float distM = clamp(1.0 - vis.r / max(uBlurDist, 0.0001), 0.0, 1.0);  // BLUR DISTANCE: full blur at the lamp, zero at the slider distance
+        float classM = max(vis.b, 1.0 - uDynOnly) * distM;
         float visibility = mix(vis.a, blur.a, classM);
         
         // Base darkness level
@@ -1497,6 +1511,7 @@ function createFlashlight() {
       uVisBlurTex: { value: null },
       uVisBlurTex2: { value: null },
       uDynOnly: { value: blurDynOnly ? 1 : 0 },
+      uBlurDist: { value: 0.5 },
       uHalfW: { value: 512 },
       uBufH: { value: 512 }
     }
@@ -1534,6 +1549,7 @@ function createFlashlight() {
         uniform sampler2D uVisBlurTex;
         uniform sampler2D uVisBlurTex2;
         uniform float uDynOnly;
+        uniform float uBlurDist;
         uniform float uHalfW;
         uniform float uBufH;
         uniform float uMaskStrength;
@@ -1543,7 +1559,8 @@ function createFlashlight() {
           float isRight = step(uHalfW, gl_FragCoord.x);
           vec4 vis = mix(texture2D(uVisTex, uv), texture2D(uVisTex2, uv), isRight);
           vec4 blur = mix(texture2D(uVisBlurTex, uv), texture2D(uVisBlurTex2, uv), isRight);
-          float classM = max(vis.b, 1.0 - uDynOnly);
+          float distM = clamp(1.0 - vis.r / max(uBlurDist, 0.0001), 0.0, 1.0);  // BLUR DISTANCE: full blur at the lamp, zero at the slider distance
+          float classM = max(vis.b, 1.0 - uDynOnly) * distM;
           float overAmt = mix(vis.g, blur.g, classM) * (uMaskStrength / 100.0);
           gl_FragColor = vec4(vec3(1.0), overAmt);
         }
@@ -1554,6 +1571,7 @@ function createFlashlight() {
         uVisBlurTex: { value: null },
         uVisBlurTex2: { value: null },
         uDynOnly: { value: blurDynOnly ? 1 : 0 },
+        uBlurDist: { value: 0.5 },
         uHalfW: { value: 512 },
         uBufH: { value: 512 },
         uMaskStrength: { value: maskStrength }
@@ -1909,7 +1927,7 @@ function createSettingsPanel() {
 
   settingsCanvas = document.createElement('canvas');
   settingsCanvas.width = 512;
-  settingsCanvas.height = 700;
+  settingsCanvas.height = 790;
   settingsCtx = settingsCanvas.getContext('2d');
   settingsTex = new THREE.CanvasTexture(settingsCanvas);
 
@@ -1919,7 +1937,7 @@ function createSettingsPanel() {
     depthTest: false,
     depthWrite: false
   });
-  settingsPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.956), mat);
+  settingsPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 1.078), mat);
   settingsPanel.renderOrder = 3000;
   settingsPanel.position.set(0, -0.28, -1.1);   // slightly below view center, ~1m ahead
   settingsPanel.visible = false;
@@ -1931,7 +1949,7 @@ function createSettingsPanel() {
 function updateSettingsPanel() {
   if (!settingsCtx) return;
   const ctx = settingsCtx;
-  const W = 512, H = 700;
+  const W = 512, H = 790;
 
   ctx.clearRect(0, 0, W, H);
   // Card background
@@ -1954,7 +1972,8 @@ function updateSettingsPanel() {
     { text: 'BEAM GLOW: ' + beamGlowLevel + '%', y: 466 },
     { text: 'FLASH OVER: ' + flashOver + '%', y: 524 },
     { text: 'LIGHT BLUR: ' + lightBlur, y: 582 },
-    { text: 'BLUR DYNAMIC ONLY: ' + (blurDynOnly ? 'ON' : 'OFF'), y: 640 }
+    { text: 'BLUR DYNAMIC ONLY: ' + (blurDynOnly ? 'ON' : 'OFF'), y: 640 },
+    { text: 'BLUR DISTANCE: ' + blurDistFt + ' FT', y: 698 }
   ];
   ctx.textBaseline = 'middle';
   for (let i = 0; i < rows.length; i++) {
@@ -1976,8 +1995,8 @@ function updateSettingsPanel() {
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
   ctx.font = '15px monospace';
-  ctx.fillText('stick: navigate · stick ←/→: adjust · trigger: select', W / 2, 566);
-  ctx.fillText('Y: close', W / 2, 590);
+  ctx.fillText('stick: navigate · stick ←/→: adjust · trigger: select', W / 2, 746);
+  ctx.fillText('Y: close', W / 2, 770);
 
   settingsTex.needsUpdate = true;
 }

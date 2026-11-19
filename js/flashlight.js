@@ -158,7 +158,9 @@ export function receiverShaders(cfg = FLASH, opts = {}) {
       float overShape = shape * clamp(1.0 - d / uOverReach, 0.0, 1.0) * step(0.0001, uOverReach);
       // B = surface class: 1 = dynamic mesh (furniture), 0 = structure
       // (walls / floor / ceiling / monster). Gates where the blur applies.
-      gl_FragColor = vec4(0.0, overShape, uClass, visibility);
+      // R = distance from the flashlight, normalised to RANGE: the darkness/over
+      // passes use it to fade the blur to zero at the BLUR DISTANCE.
+      gl_FragColor = vec4(min(d / RANGE, 1.0), overShape, uClass, visibility);
     }`;
   return { vertexShader, fragmentShader };
 }
