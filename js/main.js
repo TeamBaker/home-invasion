@@ -577,7 +577,7 @@ addEventListener('keydown', (e) => {
   // While the panel is open, arrows/Enter drive the panel instead of the game.
   if (settingsPanelOpen) {
     if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
-      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 8);
+      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 9);
       updateSettingsPanel();
       return;
     }
@@ -611,6 +611,10 @@ addEventListener('keydown', (e) => {
         if (flashlightOver) {
           flashlightOver.visible = flashlightMode && flashOver > 0;
         }
+        updateSettingsPanel();
+      } else if (settingsCursor === 9) {
+        lightBlur = Math.max(0, Math.min(8, lightBlur + (e.code === 'ArrowRight' ? 1 : -1)));
+        localStorage.setItem('mrh-light-blur', String(lightBlur));
         updateSettingsPanel();
       }
       return;
@@ -661,6 +665,8 @@ const _storedBeam = localStorage.getItem('mrh-flash-beam');
 let flashBeam = _storedBeam === null ? false : _storedBeam === '1';  // beam glow effect on/off
 const _storedThru = localStorage.getItem('mrh-flash-thru2');
 let flashThruFurniture = _storedThru === null ? false : _storedThru === '1';  // ON: furniture is invisible to the flashlight (visual occlusion only)
+const _storedBlur = localStorage.getItem('mrh-light-blur');
+let lightBlur = _storedBlur === null ? 6 : Math.max(0, Math.min(8, Math.round(+(_storedBlur) || 6)));  // mip level sampled for the vis field: higher = softer lit/unlit transition
 const _storedGlow = localStorage.getItem('mrh-beam-glow');
 let beamGlowLevel = _storedGlow === null ? 40 : Math.max(0, Math.min(100, +(_storedGlow) || 0));  // beam visibility (0-100%)
 const _storedOver = localStorage.getItem('mrh-flash-over2');
@@ -757,7 +763,7 @@ function readInput() {
 
           if (stickMoved && settingsStickWasZero) {
             if (Math.abs(stickY) > Math.abs(stickX)) {
-              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(8, settingsCursor + 1);
+              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(9, settingsCursor + 1);
               updateSettingsPanel();
             } else if (settingsCursor === 1) {
               roomBrightness = Math.max(0, Math.min(100, roomBrightness + (stickX > 0 ? 1 : -1)));
@@ -788,6 +794,10 @@ function readInput() {
               if (flashlightOver) {
                 flashlightOver.visible = flashlightMode && flashOver > 0;
               }
+              updateSettingsPanel();
+            } else if (settingsCursor === 9) {
+              lightBlur = Math.max(0, Math.min(8, lightBlur + (stickX > 0 ? 1 : -1)));
+              localStorage.setItem('mrh-light-blur', String(lightBlur));
               updateSettingsPanel();
             }
             settingsStickWasZero = false;
@@ -1274,15 +1284,15 @@ function createFlashlight() {
   visRT = new THREE.WebGLRenderTarget(1024, 1024, {
     depthBuffer: true,
     stencilBuffer: false,
-    generateMipmaps: false,
-    minFilter: THREE.LinearFilter,
+    generateMipmaps: true,
+    minFilter: THREE.LinearMipmapLinearFilter,
     magFilter: THREE.LinearFilter,
   });
   visRT2 = new THREE.WebGLRenderTarget(1024, 1024, {
     depthBuffer: true,
     stencilBuffer: false,
-    generateMipmaps: false,
-    minFilter: THREE.LinearFilter,
+    generateMipmaps: true,
+    minFilter: THREE.LinearMipmapLinearFilter,
     magFilter: THREE.LinearFilter,
   });
   visEyeL = new THREE.PerspectiveCamera();
@@ -1328,6 +1338,7 @@ function createFlashlight() {
         // side-by-side XR texture (both eyes) at session start.
         uniforms.uHalfW.value = r.xr.isPresenting ? r.domElement.width / 2 : r.domElement.width;
         uniforms.uBufH.value = r.domElement.height;
+        uniforms.uBlur.value = lightBlur;
       }
       if (flashlightOver && flashlightOver.visible && visRT) {
         const uOver = flashlightOver.material.uniforms;
@@ -1336,6 +1347,7 @@ function createFlashlight() {
         uOver.uHalfW.value = r.xr.isPresenting ? r.domElement.width / 2 : r.domElement.width;
         uOver.uBufH.value = r.domElement.height;
         uOver.uMaskStrength.value = maskStrength;
+        uOver.uBlur.value = lightBlur;
       }
     }
   };
@@ -1363,9 +1375,10 @@ function createFlashlight() {
   darknessOverlay.visible = false;
   camera.add(darknessOverlay);
 
-  // Partial-removal pass: re-covers the light spot with a fraction of the
-  // darkness (MASK REMOVAL %). Stencil Equal = only where the spot marked.
-  // Now uses per-pixel visibility from the receiver pass alpha channel.
+  // Darkness pass: covers the WHOLE screen with darkness, reduced per pixel by
+  // the mip-blurred visibility from the vis pass (MASK REMOVAL scales it).
+  // Sampling the vis texture at a mip level blurs the lit/unlit boundary —
+  // the LIGHT BLUR setting picks how soft that transition is.
   const coneDarknessShader = {
     vertexShader: `
       varying vec2 vUv;
@@ -1381,13 +1394,14 @@ function createFlashlight() {
       uniform sampler2D uVisTex2;
       uniform float uHalfW;
       uniform float uBufH;
+      uniform float uBlur;
       varying vec2 vUv;
       void main() {
         // Sample visibility from the current eye's texture (per-pixel flashlight
         // visibility). Left eye / desktop -> uVisTex; right eye -> uVisTex2.
         vec2 uv = vec2(mod(gl_FragCoord.x, uHalfW), gl_FragCoord.y) / vec2(uHalfW, uBufH);
         float isRight = step(uHalfW, gl_FragCoord.x);
-        float visibility = mix(texture2D(uVisTex, uv).a, texture2D(uVisTex2, uv).a, isRight);
+        float visibility = mix(texture2D(uVisTex, uv, uBlur).a, texture2D(uVisTex2, uv, uBlur).a, isRight);
         
         // Base darkness level
         float baseDarkness = 1.0 - (uRoomBrightness / 100.0);
@@ -1404,7 +1418,8 @@ function createFlashlight() {
       uVisTex: { value: null },
       uVisTex2: { value: null },
       uHalfW: { value: 512 },
-      uBufH: { value: 512 }
+      uBufH: { value: 512 },
+      uBlur: { value: lightBlur }
     }
   };
   
@@ -1416,13 +1431,7 @@ function createFlashlight() {
       uniforms: coneDarknessShader.uniforms,
       transparent: true,
       depthTest: false,
-      depthWrite: false,
-      stencilWrite: true,
-      stencilFunc: THREE.EqualStencilFunc,
-      stencilRef: 1,
-      stencilFail: THREE.KeepStencilOp,
-      stencilZFail: THREE.KeepStencilOp,
-      stencilZPass: THREE.KeepStencilOp
+      depthWrite: false
     })
   );
   coneDarkness.position.set(0, 0, -5);
@@ -1434,7 +1443,8 @@ function createFlashlight() {
   // Uses the beam's FULL shape (cone edge, fade, shadows — same dimensions as
   // the main light), scaled by a linear reach: white at the flashlight, zero at
   // FLASH OVER% of the falloff distance. The vis pass bakes that into the
-  // GREEN channel every frame; this pass just adds it where the stencil allows.
+  // GREEN channel every frame; this pass just adds it (mip-blurred like the
+  // darkness, so the white core gets a soft edge too).
   flashlightOver = new THREE.Mesh(
     new THREE.PlaneGeometry(20, 20),
     new THREE.ShaderMaterial({
@@ -1444,12 +1454,13 @@ function createFlashlight() {
         uniform sampler2D uVisTex2;
         uniform float uHalfW;
         uniform float uBufH;
+        uniform float uBlur;
         uniform float uMaskStrength;
         varying vec2 vUv;
         void main() {
           vec2 uv = vec2(mod(gl_FragCoord.x, uHalfW), gl_FragCoord.y) / vec2(uHalfW, uBufH);
           float isRight = step(uHalfW, gl_FragCoord.x);
-          float overAmt = mix(texture2D(uVisTex, uv).g, texture2D(uVisTex2, uv).g, isRight) * (uMaskStrength / 100.0);
+          float overAmt = mix(texture2D(uVisTex, uv, uBlur).g, texture2D(uVisTex2, uv, uBlur).g, isRight) * (uMaskStrength / 100.0);
           gl_FragColor = vec4(vec3(1.0), overAmt);
         }
       `,
@@ -1458,18 +1469,13 @@ function createFlashlight() {
         uVisTex2: { value: null },
         uHalfW: { value: 512 },
         uBufH: { value: 512 },
+        uBlur: { value: lightBlur },
         uMaskStrength: { value: maskStrength }
       },
       transparent: true,
       depthTest: false,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      stencilWrite: true,
-      stencilFunc: THREE.EqualStencilFunc,
-      stencilRef: 1,
-      stencilFail: THREE.KeepStencilOp,
-      stencilZFail: THREE.KeepStencilOp,
-      stencilZPass: THREE.KeepStencilOp
+      blending: THREE.AdditiveBlending
     })
   );
   flashlightOver.position.set(0, 0, -5);
@@ -1525,14 +1531,14 @@ function toggleFlashlightMode() {
     if (!flashlightModel) createFlashlight();
     flashlightModel.visible = true;
     spotGroup.visible = true;
-    darknessOverlay.visible = true;
+    darknessOverlay.visible = false;   // coneDarkness now covers the whole screen from the blurred vis
     coneDarkness.visible = true;
     if (flashlightOver) flashlightOver.visible = flashOver > 0;
     updateBeamGlow();   // beam state may have changed while mode was off
   } else {
     if (flashlightModel) flashlightModel.visible = false;
     if (spotGroup) spotGroup.visible = false;
-    if (darknessOverlay) darknessOverlay.visible = false;
+    if (darknessOverlay) darknessOverlay.visible = true;   // static darkness back when the light is off
     if (coneDarkness) coneDarkness.visible = false;
     if (flashlightOver) flashlightOver.visible = false;
   }
@@ -1833,7 +1839,8 @@ function updateSettingsPanel() {
     { text: 'BEAM: ' + (flashBeam ? 'ON' : 'OFF'), y: 350 },
     { text: 'SHINE THRU FURNITURE: ' + (flashThruFurniture ? 'ON' : 'OFF'), y: 408 },
     { text: 'BEAM GLOW: ' + beamGlowLevel + '%', y: 466 },
-    { text: 'FLASH OVER: ' + flashOver + '%', y: 524 }
+    { text: 'FLASH OVER: ' + flashOver + '%', y: 524 },
+    { text: 'LIGHT BLUR: ' + lightBlur, y: 582 }
   ];
   ctx.textBaseline = 'middle';
   for (let i = 0; i < rows.length; i++) {
