@@ -577,7 +577,7 @@ addEventListener('keydown', (e) => {
   // While the panel is open, arrows/Enter drive the panel instead of the game.
   if (settingsPanelOpen) {
     if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
-      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 8);
+      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 11);
       updateSettingsPanel();
       return;
     }
@@ -612,6 +612,13 @@ addEventListener('keydown', (e) => {
           flashlightOver.visible = flashlightMode && flashOver > 0;
         }
         updateSettingsPanel();
+      } else if (settingsCursor === 9) {
+        lightBlur = Math.max(0, Math.min(8, lightBlur + (e.code === 'ArrowRight' ? 1 : -1)));
+        localStorage.setItem('mrh-light-blur', String(lightBlur));
+        updateSettingsPanel();
+      } else if (settingsCursor === 11) {
+        blurDistFt = Math.max(1, Math.min(39, blurDistFt + (e.code === 'ArrowRight' ? 1 : -1)));localStorage.setItem('mrh-blur-dist2', String(blurDistFt));
+        updateSettingsPanel();
       }
       return;
     }
@@ -624,6 +631,9 @@ addEventListener('keydown', (e) => {
       } else if (settingsCursor === 6) {
         flashThruFurniture = !flashThruFurniture;
         localStorage.setItem('mrh-flash-thru2', flashThruFurniture ? '1' : '0');
+      } else if (settingsCursor === 10) {
+        blurDynOnly = !blurDynOnly;
+        localStorage.setItem('mrh-blur-dyn', blurDynOnly ? '1' : '0');
       }
       updateSettingsPanel();
       return;
@@ -661,6 +671,12 @@ const _storedBeam = localStorage.getItem('mrh-flash-beam');
 let flashBeam = _storedBeam === null ? false : _storedBeam === '1';  // beam glow effect on/off
 const _storedThru = localStorage.getItem('mrh-flash-thru2');
 let flashThruFurniture = _storedThru === null ? false : _storedThru === '1';  // ON: furniture is invisible to the flashlight (visual occlusion only)
+const _storedBlur = localStorage.getItem('mrh-light-blur');
+let lightBlur = _storedBlur === null ? 6 : Math.max(0, Math.min(8, Math.round(+(_storedBlur) || 6)));  // Gaussian blur strength for the vis field: higher = softer lit/unlit transition
+const _storedBlurDyn = localStorage.getItem('mrh-blur-dyn');
+let blurDynOnly = _storedBlurDyn === null ? true : _storedBlurDyn === '1';  // ON: the blur only softens the dynamic mesh (furniture); OFF: it softens everything
+const _storedBlurDist = localStorage.getItem('mrh-blur-dist2');
+let blurDistFt = _storedBlurDist === null ? 3 : Math.max(1, Math.min(39, Math.round(+(_storedBlurDist) || 3)));  // BLUR DISTANCE: max world-space distance (feet) between surfaces for the blur to mix them
 const _storedGlow = localStorage.getItem('mrh-beam-glow');
 let beamGlowLevel = _storedGlow === null ? 40 : Math.max(0, Math.min(100, +(_storedGlow) || 0));  // beam visibility (0-100%)
 const _storedOver = localStorage.getItem('mrh-flash-over2');
@@ -675,12 +691,20 @@ let lightCam = null;         // shadow camera = the flashlight
 let shadowRT = null;         // depth-only shadow map
 let visRT = null;            // visibility render target (left eye)
 let visRT2 = null;           // visibility render target (right eye)
+let visBlurRT = null;        // Gaussian-blurred vis (left/desktop)
+let visBlurRT2 = null;       // Gaussian-blurred vis (right eye)
+let blurTmpRT = null;        // scratch target for the separable passes
+let blurCam = null;
+let blurMat = null;
+let blurQuad = null;
+let blurScene = null;
 let visEyeL = null;          // dedicated camera for the visibility pass (left eye)
 let visEyeR = null;          // dedicated camera for the visibility pass (right eye)
 let casterScene = null;      // depth-pass proxies (separate scene → no recursion into main render)
 let casterMat = null;
 let receiverMat = null;
-let receiverMatThru = null;   // SHINE THRU variant: no away-face test — whole silhouette gets stencil
+let receiverMatThru = null;
+let receiverMatStruct = null;   // structure class: never blurred   // SHINE THRU variant: no away-face test — whole silhouette gets stencil
 const lightProxies = new Map();  // source mesh → { recv, cast, stamp }
 let proxyStamp = 0;
 let visFrameStamp = 0;
@@ -744,6 +768,9 @@ function readInput() {
           } else if (settingsCursor === 6) {
             flashThruFurniture = !flashThruFurniture;
             localStorage.setItem('mrh-flash-thru2', flashThruFurniture ? '1' : '0');
+          } else if (settingsCursor === 10) {
+            blurDynOnly = !blurDynOnly;
+            localStorage.setItem('mrh-blur-dyn', blurDynOnly ? '1' : '0');
           }
           updateSettingsPanel();
         }
@@ -757,7 +784,7 @@ function readInput() {
 
           if (stickMoved && settingsStickWasZero) {
             if (Math.abs(stickY) > Math.abs(stickX)) {
-              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(8, settingsCursor + 1);
+              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(11, settingsCursor + 1);
               updateSettingsPanel();
             } else if (settingsCursor === 1) {
               roomBrightness = Math.max(0, Math.min(100, roomBrightness + (stickX > 0 ? 1 : -1)));
@@ -788,6 +815,14 @@ function readInput() {
               if (flashlightOver) {
                 flashlightOver.visible = flashlightMode && flashOver > 0;
               }
+              updateSettingsPanel();
+            } else if (settingsCursor === 9) {
+              lightBlur = Math.max(0, Math.min(8, lightBlur + (stickX > 0 ? 1 : -1)));
+              localStorage.setItem('mrh-light-blur', String(lightBlur));
+              updateSettingsPanel();
+            } else if (settingsCursor === 11) {
+              blurDistFt = Math.max(1, Math.min(39, blurDistFt + (stickX > 0 ? 1 : -1)));
+              localStorage.setItem('mrh-blur-dist2', String(blurDistFt));
               updateSettingsPanel();
             }
             settingsStickWasZero = false;
@@ -1206,18 +1241,22 @@ function createFlashlight() {
   // map rendered from the flashlight each frame). The beam through air is invisible.
   const { vertexShader, fragmentShader } = receiverShaders(FLASH);
   const thruShaders = receiverShaders(FLASH, { thru: true });
+  // One shared uniform-value set: per-frame updates on receiverMat.uniforms
+  // propagate to every variant automatically (same value objects).
+  const sharedU = {
+    uLightPos: { value: new THREE.Vector3() },
+    uLightDir: { value: new THREE.Vector3(0, 0, -1) },
+    uLightVP: { value: new THREE.Matrix4() },
+    uShadow: { value: null },
+    uDist: { value: 20 * 0.3048 },
+    uOverReach: { value: (flashOver / 100) * flashFalloffFt * 0.3048 },
+    uFade: { value: 0.3 },
+  };
+  const visUniforms = (cls) => Object.assign({}, sharedU, { uClass: { value: cls } });
   receiverMat = new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader,
-    uniforms: {
-      uLightPos: { value: new THREE.Vector3() },
-      uLightDir: { value: new THREE.Vector3(0, 0, -1) },
-      uLightVP: { value: new THREE.Matrix4() },
-      uShadow: { value: null },
-      uDist: { value: 20 * 0.3048 },
-      uOverReach: { value: (flashOver / 100) * flashFalloffFt * 0.3048 },
-      uFade: { value: 0.3 },
-    },
+    uniforms: visUniforms(1),   // dynamic mesh class
     colorWrite: false,
     depthWrite: false,
     depthTest: true,
@@ -1239,7 +1278,27 @@ function createFlashlight() {
   receiverMatThru = new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader: thruShaders.fragmentShader,
-    uniforms: receiverMat.uniforms,          // shared — one per-frame update serves both
+    uniforms: visUniforms(1),                // shared values — one per-frame update serves all
+    colorWrite: false,
+    depthWrite: false,
+    depthTest: true,
+    side: THREE.DoubleSide,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -4,
+    stencilWrite: true,
+    stencilRef: 1,
+    stencilFunc: THREE.AlwaysStencilFunc,
+    stencilZPass: THREE.ReplaceStencilOp,
+    stencilZFail: THREE.KeepStencilOp,
+    stencilFail: THREE.KeepStencilOp
+  });
+  // Structure variant (walls / floor / ceiling / monster): class 0 — the blur
+  // never softens these, they keep their hard light edges.
+  receiverMatStruct = new THREE.ShaderMaterial({
+    vertexShader,
+    fragmentShader,
+    uniforms: visUniforms(0),
     colorWrite: false,
     depthWrite: false,
     depthTest: true,
@@ -1277,6 +1336,8 @@ function createFlashlight() {
     generateMipmaps: false,
     minFilter: THREE.LinearFilter,
     magFilter: THREE.LinearFilter,
+    type: THREE.HalfFloatType,
+    count: 3,
   });
   visRT2 = new THREE.WebGLRenderTarget(1024, 1024, {
     depthBuffer: true,
@@ -1284,11 +1345,78 @@ function createFlashlight() {
     generateMipmaps: false,
     minFilter: THREE.LinearFilter,
     magFilter: THREE.LinearFilter,
+    type: THREE.HalfFloatType,
+    count: 3,
   });
   visEyeL = new THREE.PerspectiveCamera();
   visEyeR = new THREE.PerspectiveCamera();
   visEyeL.matrixWorldAutoUpdate = false;
   visEyeR.matrixWorldAutoUpdate = false;
+  // Gaussian-blurred copies of the vis textures (LIGHT BLUR): two separable
+  // passes at half res — smooth falloff, none of the mip-level blockiness.
+  visBlurRT = new THREE.WebGLRenderTarget(512, 512, { depthBuffer: false, stencilBuffer: false, generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+  visBlurRT2 = new THREE.WebGLRenderTarget(512, 512, { depthBuffer: false, stencilBuffer: false, generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+  blurTmpRT = new THREE.WebGLRenderTarget(512, 512, { depthBuffer: false, stencilBuffer: false, generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+  blurCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  blurMat = new THREE.ShaderMaterial({
+    uniforms: { tex: { value: null }, geoPos: { value: null }, geoNrm: { value: null }, uDir: { value: new THREE.Vector2() }, uBlurDist: { value: 6.0 } },
+    vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+    fragmentShader: `
+      uniform sampler2D tex;
+      uniform sampler2D geoPos;
+      uniform sampler2D geoNrm;
+      uniform vec2 uDir;
+      uniform float uBlurDist;
+      varying vec2 vUv;
+      void main() {
+        // Sample center pixel
+        vec4 vis = texture2D(tex, vUv);
+        vec4 centerPos = texture2D(geoPos, vUv);
+        vec4 centerNrm = texture2D(geoNrm, vUv);
+        float cls = vis.b;   // class channel: never blurred
+        
+        // Initialize accumulation with center pixel
+        vec4 sum = vis * 0.227027;
+        float wsum = 0.227027;
+        
+        // Sample taps
+        vec2 offsets[4] = vec2[4](uDir * 1.3846, uDir * -1.3846, uDir * 3.2308, uDir * -3.2308);
+        float weights[4] = float[4](0.316216, 0.316216, 0.070270, 0.070270);
+        
+        for (int i = 0; i < 4; i++) {
+          vec2 tapUv = vUv + offsets[i];
+          vec4 tapVis = texture2D(tex, tapUv);
+          vec4 tapPos = texture2D(geoPos, tapUv);
+          vec4 tapNrm = texture2D(geoNrm, tapUv);
+          
+          // Reject tap when: no geometry, world distance >= uBlurDist, or facing rule fails
+          if (tapPos.a < 0.5) continue;
+          
+          float dist = distance(centerPos.xyz, tapPos.xyz);
+          if (dist >= uBlurDist) continue;
+          
+          float facing = dot(centerNrm.xyz, tapNrm.xyz);
+          if (smoothstep(0.35, 0.65, facing) <= 0.0) continue;
+          
+          // Scale weight by distance falloff
+          float distWeight = clamp(1.0 - dist / uBlurDist, 0.0, 1.0);
+          float tapWeight = weights[i] * distWeight;
+          
+          sum += tapVis * tapWeight;
+          wsum += tapWeight;
+        }
+        
+        // Renormalize
+        vec4 result = sum / max(wsum, 0.0001);
+        gl_FragColor = vec4(0.0, result.g, cls, result.a);
+      }`,
+    depthTest: false,
+    depthWrite: false
+  });
+  blurQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), blurMat);
+  blurQuad.frustumCulled = false;
+  blurScene = new THREE.Scene();
+  blurScene.add(blurQuad);
   shadowRT = new THREE.WebGLRenderTarget(res, res, {
     depthBuffer: true,
     stencilBuffer: false,
@@ -1320,6 +1448,9 @@ function createFlashlight() {
         const uniforms = coneDarkness.material.uniforms;
         uniforms.uVisTex.value = visRT.texture;
         if (visRT2) uniforms.uVisTex2.value = visRT2.texture;
+        uniforms.uVisBlurTex.value = lightBlur > 0 ? visBlurRT.texture : visRT.texture;
+        if (visRT2) uniforms.uVisBlurTex2.value = lightBlur > 0 ? visBlurRT2.texture : visRT2.texture;
+        uniforms.uDynOnly.value = blurDynOnly ? 1 : 0;
         // three r170 has no renderer.drawingBufferWidth/Height (undefined -> NaN
         // uniforms -> the cone-darkness shader sampled the visibility map at NaN
         // and re-covered the flashlight spot with full darkness on every platform).
@@ -1333,6 +1464,9 @@ function createFlashlight() {
         const uOver = flashlightOver.material.uniforms;
         uOver.uVisTex.value = visRT.texture;
         if (visRT2) uOver.uVisTex2.value = visRT2.texture;
+        uOver.uVisBlurTex.value = lightBlur > 0 ? visBlurRT.texture : visRT.texture;
+        if (visRT2) uOver.uVisBlurTex2.value = lightBlur > 0 ? visBlurRT2.texture : visRT2.texture;
+        uOver.uDynOnly.value = blurDynOnly ? 1 : 0;
         uOver.uHalfW.value = r.xr.isPresenting ? r.domElement.width / 2 : r.domElement.width;
         uOver.uBufH.value = r.domElement.height;
         uOver.uMaskStrength.value = maskStrength;
@@ -1363,9 +1497,10 @@ function createFlashlight() {
   darknessOverlay.visible = false;
   camera.add(darknessOverlay);
 
-  // Partial-removal pass: re-covers the light spot with a fraction of the
-  // darkness (MASK REMOVAL %). Stencil Equal = only where the spot marked.
-  // Now uses per-pixel visibility from the receiver pass alpha channel.
+  // Darkness pass: covers the WHOLE screen with darkness, reduced per pixel by
+  // the mip-blurred visibility from the vis pass (MASK REMOVAL scales it).
+  // The vis field is Gaussian-blurred (LIGHT BLUR) before this pass samples
+  // it — a smooth lit/unlit transition with no blocky steps.
   const coneDarknessShader = {
     vertexShader: `
       varying vec2 vUv;
@@ -1379,15 +1514,22 @@ function createFlashlight() {
       uniform float uMaskStrength;
       uniform sampler2D uVisTex;
       uniform sampler2D uVisTex2;
+      uniform sampler2D uVisBlurTex;
+      uniform sampler2D uVisBlurTex2;
+      uniform float uDynOnly;
       uniform float uHalfW;
       uniform float uBufH;
       varying vec2 vUv;
       void main() {
-        // Sample visibility from the current eye's texture (per-pixel flashlight
-        // visibility). Left eye / desktop -> uVisTex; right eye -> uVisTex2.
+        // Per-pixel flashlight visibility: raw + Gaussian-blurred (LIGHT BLUR).
+        // Class channel (B: 1 = dynamic mesh, 0 = walls/floor/monster) picks
+        // which one applies, so the blur can be scoped to the dynamic mesh.
         vec2 uv = vec2(mod(gl_FragCoord.x, uHalfW), gl_FragCoord.y) / vec2(uHalfW, uBufH);
         float isRight = step(uHalfW, gl_FragCoord.x);
-        float visibility = mix(texture2D(uVisTex, uv).a, texture2D(uVisTex2, uv).a, isRight);
+        vec4 vis = mix(texture2D(uVisTex, uv), texture2D(uVisTex2, uv), isRight);
+        vec4 blur = mix(texture2D(uVisBlurTex, uv), texture2D(uVisBlurTex2, uv), isRight);
+        float classM = max(vis.b, 1.0 - uDynOnly);
+        float visibility = mix(vis.a, blur.a, classM);
         
         // Base darkness level
         float baseDarkness = 1.0 - (uRoomBrightness / 100.0);
@@ -1403,6 +1545,9 @@ function createFlashlight() {
       uMaskStrength: { value: maskStrength },
       uVisTex: { value: null },
       uVisTex2: { value: null },
+      uVisBlurTex: { value: null },
+      uVisBlurTex2: { value: null },
+      uDynOnly: { value: blurDynOnly ? 1 : 0 },
       uHalfW: { value: 512 },
       uBufH: { value: 512 }
     }
@@ -1416,13 +1561,7 @@ function createFlashlight() {
       uniforms: coneDarknessShader.uniforms,
       transparent: true,
       depthTest: false,
-      depthWrite: false,
-      stencilWrite: true,
-      stencilFunc: THREE.EqualStencilFunc,
-      stencilRef: 1,
-      stencilFail: THREE.KeepStencilOp,
-      stencilZFail: THREE.KeepStencilOp,
-      stencilZPass: THREE.KeepStencilOp
+      depthWrite: false
     })
   );
   coneDarkness.position.set(0, 0, -5);
@@ -1434,7 +1573,8 @@ function createFlashlight() {
   // Uses the beam's FULL shape (cone edge, fade, shadows — same dimensions as
   // the main light), scaled by a linear reach: white at the flashlight, zero at
   // FLASH OVER% of the falloff distance. The vis pass bakes that into the
-  // GREEN channel every frame; this pass just adds it where the stencil allows.
+  // GREEN channel every frame; this pass just adds it (Gaussian-blurred like
+  // the darkness, so the white core gets a soft edge too).
   flashlightOver = new THREE.Mesh(
     new THREE.PlaneGeometry(20, 20),
     new THREE.ShaderMaterial({
@@ -1442,6 +1582,9 @@ function createFlashlight() {
       fragmentShader: `
         uniform sampler2D uVisTex;
         uniform sampler2D uVisTex2;
+        uniform sampler2D uVisBlurTex;
+        uniform sampler2D uVisBlurTex2;
+        uniform float uDynOnly;
         uniform float uHalfW;
         uniform float uBufH;
         uniform float uMaskStrength;
@@ -1449,13 +1592,19 @@ function createFlashlight() {
         void main() {
           vec2 uv = vec2(mod(gl_FragCoord.x, uHalfW), gl_FragCoord.y) / vec2(uHalfW, uBufH);
           float isRight = step(uHalfW, gl_FragCoord.x);
-          float overAmt = mix(texture2D(uVisTex, uv).g, texture2D(uVisTex2, uv).g, isRight) * (uMaskStrength / 100.0);
+          vec4 vis = mix(texture2D(uVisTex, uv), texture2D(uVisTex2, uv), isRight);
+          vec4 blur = mix(texture2D(uVisBlurTex, uv), texture2D(uVisBlurTex2, uv), isRight);
+          float classM = max(vis.b, 1.0 - uDynOnly);
+          float overAmt = mix(vis.g, blur.g, classM) * (uMaskStrength / 100.0);
           gl_FragColor = vec4(vec3(1.0), overAmt);
         }
       `,
       uniforms: {
         uVisTex: { value: null },
         uVisTex2: { value: null },
+        uVisBlurTex: { value: null },
+        uVisBlurTex2: { value: null },
+        uDynOnly: { value: blurDynOnly ? 1 : 0 },
         uHalfW: { value: 512 },
         uBufH: { value: 512 },
         uMaskStrength: { value: maskStrength }
@@ -1463,13 +1612,7 @@ function createFlashlight() {
       transparent: true,
       depthTest: false,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      stencilWrite: true,
-      stencilFunc: THREE.EqualStencilFunc,
-      stencilRef: 1,
-      stencilFail: THREE.KeepStencilOp,
-      stencilZFail: THREE.KeepStencilOp,
-      stencilZPass: THREE.KeepStencilOp
+      blending: THREE.AdditiveBlending
     })
   );
   flashlightOver.position.set(0, 0, -5);
@@ -1503,6 +1646,7 @@ function updateBeamGlow() {
         opacity: 0.15,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
+        depthTest: false,
         side: THREE.DoubleSide
       })
     );
@@ -1525,14 +1669,14 @@ function toggleFlashlightMode() {
     if (!flashlightModel) createFlashlight();
     flashlightModel.visible = true;
     spotGroup.visible = true;
-    darknessOverlay.visible = true;
+    darknessOverlay.visible = false;   // coneDarkness now covers the whole screen from the blurred vis
     coneDarkness.visible = true;
     if (flashlightOver) flashlightOver.visible = flashOver > 0;
     updateBeamGlow();   // beam state may have changed while mode was off
   } else {
     if (flashlightModel) flashlightModel.visible = false;
     if (spotGroup) spotGroup.visible = false;
-    if (darknessOverlay) darknessOverlay.visible = false;
+    if (darknessOverlay) darknessOverlay.visible = true;   // static darkness back when the light is off
     if (coneDarkness) coneDarkness.visible = false;
     if (flashlightOver) flashlightOver.visible = false;
   }
@@ -1636,7 +1780,7 @@ function _syncProxy(src) {
   // the darkness using the light of the surface behind them) but never CASTS
   // shadows and is hidden in the visibility pass.
   const recvOnly = flashThruFurniture && src.userData.__furn === true;
-  p.recv.material = recvOnly ? receiverMatThru : receiverMat;
+  p.recv.material = recvOnly ? receiverMatThru : (src.userData.__furn === true ? receiverMat : receiverMatStruct);
   p.cast.visible = _worldVisible(src) && !recvOnly;   // casters: three culls them to the light frustum
   // Receivers outside the beam can never light up — skip their draw call entirely.
   p.recv.visible = _worldVisible(src) && _lightFrustum.intersectsObject(p.recv);
@@ -1748,6 +1892,8 @@ function renderFlashlightShadow(r) {
     }
     r.xr.enabled = false;
     receiverMat.colorWrite = true;
+    receiverMatStruct.colorWrite = true;
+    receiverMatThru.colorWrite = true;
     // SHINE THRU FURNITURE: hide furniture receivers in the visibility pass —
     // the surface behind them fills their pixels, so they inherit its light.
     const _thruHidden = [];
@@ -1765,9 +1911,42 @@ function renderFlashlightShadow(r) {
       r.render(spotGroup, camR);
     }
     for (const m of _thruHidden) m.visible = true;
+    // Gaussian blur of the vis field (LIGHT BLUR): two separable passes per eye.
+    if (lightBlur > 0) {
+      const stepUv = lightBlur * 0.64 / 512;
+      blurMat.uniforms.uBlurDist.value = blurDistFt * 0.3048;
+      
+      // Left eye passes
+      blurMat.uniforms.geoPos.value = visRT.textures[1];
+      blurMat.uniforms.geoNrm.value = visRT.textures[2];
+      blurMat.uniforms.uDir.value.set(stepUv, 0);
+      blurMat.uniforms.tex.value = visRT.texture;
+      r.setRenderTarget(blurTmpRT);
+      r.render(blurScene, blurCam);
+      blurMat.uniforms.uDir.value.set(0, stepUv);
+      blurMat.uniforms.tex.value = blurTmpRT.texture;
+      r.setRenderTarget(visBlurRT);
+      r.render(blurScene, blurCam);
+      
+      // Right eye passes
+      if (camR && visRT2) {
+        blurMat.uniforms.geoPos.value = visRT2.textures[1];
+        blurMat.uniforms.geoNrm.value = visRT2.textures[2];
+        blurMat.uniforms.uDir.value.set(stepUv, 0);
+        blurMat.uniforms.tex.value = visRT2.texture;
+        r.setRenderTarget(blurTmpRT);
+        r.render(blurScene, blurCam);
+        blurMat.uniforms.uDir.value.set(0, stepUv);
+        blurMat.uniforms.tex.value = blurTmpRT.texture;
+        r.setRenderTarget(visBlurRT2);
+        r.render(blurScene, blurCam);
+      }
+    }
     r.setRenderTarget(prevTarget);
     r.xr.enabled = xrEnabled;
     receiverMat.colorWrite = false;
+    receiverMatStruct.colorWrite = false;
+    receiverMatThru.colorWrite = false;
   }
 }
 
@@ -1790,7 +1969,7 @@ function createSettingsPanel() {
 
   settingsCanvas = document.createElement('canvas');
   settingsCanvas.width = 512;
-  settingsCanvas.height = 620;
+  settingsCanvas.height = 790;
   settingsCtx = settingsCanvas.getContext('2d');
   settingsTex = new THREE.CanvasTexture(settingsCanvas);
 
@@ -1800,7 +1979,7 @@ function createSettingsPanel() {
     depthTest: false,
     depthWrite: false
   });
-  settingsPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.847), mat);
+  settingsPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 1.078), mat);
   settingsPanel.renderOrder = 3000;
   settingsPanel.position.set(0, -0.28, -1.1);   // slightly below view center, ~1m ahead
   settingsPanel.visible = false;
@@ -1812,7 +1991,7 @@ function createSettingsPanel() {
 function updateSettingsPanel() {
   if (!settingsCtx) return;
   const ctx = settingsCtx;
-  const W = 512, H = 620;
+  const W = 512, H = 790;
 
   ctx.clearRect(0, 0, W, H);
   // Card background
@@ -1833,7 +2012,10 @@ function updateSettingsPanel() {
     { text: 'BEAM: ' + (flashBeam ? 'ON' : 'OFF'), y: 350 },
     { text: 'SHINE THRU FURNITURE: ' + (flashThruFurniture ? 'ON' : 'OFF'), y: 408 },
     { text: 'BEAM GLOW: ' + beamGlowLevel + '%', y: 466 },
-    { text: 'FLASH OVER: ' + flashOver + '%', y: 524 }
+    { text: 'FLASH OVER: ' + flashOver + '%', y: 524 },
+    { text: 'LIGHT BLUR: ' + lightBlur, y: 582 },
+    { text: 'BLUR DYNAMIC ONLY: ' + (blurDynOnly ? 'ON' : 'OFF'), y: 640 },
+    { text: 'BLUR DISTANCE: ' + blurDistFt + ' FT', y: 698 }
   ];
   ctx.textBaseline = 'middle';
   for (let i = 0; i < rows.length; i++) {
@@ -1855,8 +2037,8 @@ function updateSettingsPanel() {
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
   ctx.font = '15px monospace';
-  ctx.fillText('stick: navigate · stick ←/→: adjust · trigger: select', W / 2, 566);
-  ctx.fillText('Y: close', W / 2, 590);
+  ctx.fillText('stick: navigate · stick ←/→: adjust · trigger: select', W / 2, 746);
+  ctx.fillText('Y: close', W / 2, 770);
 
   settingsTex.needsUpdate = true;
 }
