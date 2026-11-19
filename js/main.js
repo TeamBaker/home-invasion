@@ -681,6 +681,13 @@ let lightCam = null;         // shadow camera = the flashlight
 let shadowRT = null;         // depth-only shadow map
 let visRT = null;            // visibility render target (left eye)
 let visRT2 = null;           // visibility render target (right eye)
+let visBlurRT = null;        // Gaussian-blurred vis (left/desktop)
+let visBlurRT2 = null;       // Gaussian-blurred vis (right eye)
+let blurTmpRT = null;        // scratch target for the separable passes
+let blurCam = null;
+let blurMat = null;
+let blurQuad = null;
+let blurScene = null;
 let visEyeL = null;          // dedicated camera for the visibility pass (left eye)
 let visEyeR = null;          // dedicated camera for the visibility pass (right eye)
 let casterScene = null;      // depth-pass proxies (separate scene → no recursion into main render)
@@ -1284,21 +1291,47 @@ function createFlashlight() {
   visRT = new THREE.WebGLRenderTarget(1024, 1024, {
     depthBuffer: true,
     stencilBuffer: false,
-    generateMipmaps: true,
-    minFilter: THREE.LinearMipmapLinearFilter,
+    generateMipmaps: false,
+    minFilter: THREE.LinearFilter,
     magFilter: THREE.LinearFilter,
   });
   visRT2 = new THREE.WebGLRenderTarget(1024, 1024, {
     depthBuffer: true,
     stencilBuffer: false,
-    generateMipmaps: true,
-    minFilter: THREE.LinearMipmapLinearFilter,
+    generateMipmaps: false,
+    minFilter: THREE.LinearFilter,
     magFilter: THREE.LinearFilter,
   });
   visEyeL = new THREE.PerspectiveCamera();
   visEyeR = new THREE.PerspectiveCamera();
   visEyeL.matrixWorldAutoUpdate = false;
   visEyeR.matrixWorldAutoUpdate = false;
+  // Gaussian-blurred copies of the vis textures (LIGHT BLUR): two separable
+  // passes at half res — smooth falloff, none of the mip-level blockiness.
+  visBlurRT = new THREE.WebGLRenderTarget(512, 512, { depthBuffer: false, stencilBuffer: false, generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+  visBlurRT2 = new THREE.WebGLRenderTarget(512, 512, { depthBuffer: false, stencilBuffer: false, generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+  blurTmpRT = new THREE.WebGLRenderTarget(512, 512, { depthBuffer: false, stencilBuffer: false, generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+  blurCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  blurMat = new THREE.ShaderMaterial({
+    uniforms: { tex: { value: null }, uDir: { value: new THREE.Vector2() } },
+    vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+    fragmentShader: `
+      uniform sampler2D tex;
+      uniform vec2 uDir;
+      varying vec2 vUv;
+      void main() {
+        vec4 sum = texture2D(tex, vUv) * 0.227027;
+        sum += (texture2D(tex, vUv + uDir * 1.3846) + texture2D(tex, vUv - uDir * 1.3846)) * 0.316216;
+        sum += (texture2D(tex, vUv + uDir * 3.2308) + texture2D(tex, vUv - uDir * 3.2308)) * 0.070270;
+        gl_FragColor = vec4(0.0, sum.g, 0.0, sum.a);
+      }`,
+    depthTest: false,
+    depthWrite: false
+  });
+  blurQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), blurMat);
+  blurQuad.frustumCulled = false;
+  blurScene = new THREE.Scene();
+  blurScene.add(blurQuad);
   shadowRT = new THREE.WebGLRenderTarget(res, res, {
     depthBuffer: true,
     stencilBuffer: false,
@@ -1328,8 +1361,8 @@ function createFlashlight() {
       // Update cone darkness uniforms with visibility texture
       if (coneDarkness && coneDarkness.material.uniforms && visRT) {
         const uniforms = coneDarkness.material.uniforms;
-        uniforms.uVisTex.value = visRT.texture;
-        if (visRT2) uniforms.uVisTex2.value = visRT2.texture;
+        uniforms.uVisTex.value = lightBlur > 0 ? visBlurRT.texture : visRT.texture;
+        if (visRT2) uniforms.uVisTex2.value = lightBlur > 0 ? visBlurRT2.texture : visRT2.texture;
         // three r170 has no renderer.drawingBufferWidth/Height (undefined -> NaN
         // uniforms -> the cone-darkness shader sampled the visibility map at NaN
         // and re-covered the flashlight spot with full darkness on every platform).
@@ -1338,16 +1371,14 @@ function createFlashlight() {
         // side-by-side XR texture (both eyes) at session start.
         uniforms.uHalfW.value = r.xr.isPresenting ? r.domElement.width / 2 : r.domElement.width;
         uniforms.uBufH.value = r.domElement.height;
-        uniforms.uBlur.value = lightBlur;
       }
       if (flashlightOver && flashlightOver.visible && visRT) {
         const uOver = flashlightOver.material.uniforms;
-        uOver.uVisTex.value = visRT.texture;
-        if (visRT2) uOver.uVisTex2.value = visRT2.texture;
+        uOver.uVisTex.value = lightBlur > 0 ? visBlurRT.texture : visRT.texture;
+        if (visRT2) uOver.uVisTex2.value = lightBlur > 0 ? visBlurRT2.texture : visRT2.texture;
         uOver.uHalfW.value = r.xr.isPresenting ? r.domElement.width / 2 : r.domElement.width;
         uOver.uBufH.value = r.domElement.height;
         uOver.uMaskStrength.value = maskStrength;
-        uOver.uBlur.value = lightBlur;
       }
     }
   };
@@ -1377,8 +1408,8 @@ function createFlashlight() {
 
   // Darkness pass: covers the WHOLE screen with darkness, reduced per pixel by
   // the mip-blurred visibility from the vis pass (MASK REMOVAL scales it).
-  // Sampling the vis texture at a mip level blurs the lit/unlit boundary —
-  // the LIGHT BLUR setting picks how soft that transition is.
+  // The vis field is Gaussian-blurred (LIGHT BLUR) before this pass samples
+  // it — a smooth lit/unlit transition with no blocky steps.
   const coneDarknessShader = {
     vertexShader: `
       varying vec2 vUv;
@@ -1394,14 +1425,13 @@ function createFlashlight() {
       uniform sampler2D uVisTex2;
       uniform float uHalfW;
       uniform float uBufH;
-      uniform float uBlur;
       varying vec2 vUv;
       void main() {
         // Sample visibility from the current eye's texture (per-pixel flashlight
         // visibility). Left eye / desktop -> uVisTex; right eye -> uVisTex2.
         vec2 uv = vec2(mod(gl_FragCoord.x, uHalfW), gl_FragCoord.y) / vec2(uHalfW, uBufH);
         float isRight = step(uHalfW, gl_FragCoord.x);
-        float visibility = mix(texture2D(uVisTex, uv, uBlur).a, texture2D(uVisTex2, uv, uBlur).a, isRight);
+        float visibility = mix(texture2D(uVisTex, uv).a, texture2D(uVisTex2, uv).a, isRight);
         
         // Base darkness level
         float baseDarkness = 1.0 - (uRoomBrightness / 100.0);
@@ -1418,8 +1448,7 @@ function createFlashlight() {
       uVisTex: { value: null },
       uVisTex2: { value: null },
       uHalfW: { value: 512 },
-      uBufH: { value: 512 },
-      uBlur: { value: lightBlur }
+      uBufH: { value: 512 }
     }
   };
   
@@ -1443,8 +1472,8 @@ function createFlashlight() {
   // Uses the beam's FULL shape (cone edge, fade, shadows — same dimensions as
   // the main light), scaled by a linear reach: white at the flashlight, zero at
   // FLASH OVER% of the falloff distance. The vis pass bakes that into the
-  // GREEN channel every frame; this pass just adds it (mip-blurred like the
-  // darkness, so the white core gets a soft edge too).
+  // GREEN channel every frame; this pass just adds it (Gaussian-blurred like
+  // the darkness, so the white core gets a soft edge too).
   flashlightOver = new THREE.Mesh(
     new THREE.PlaneGeometry(20, 20),
     new THREE.ShaderMaterial({
@@ -1454,13 +1483,12 @@ function createFlashlight() {
         uniform sampler2D uVisTex2;
         uniform float uHalfW;
         uniform float uBufH;
-        uniform float uBlur;
         uniform float uMaskStrength;
         varying vec2 vUv;
         void main() {
           vec2 uv = vec2(mod(gl_FragCoord.x, uHalfW), gl_FragCoord.y) / vec2(uHalfW, uBufH);
           float isRight = step(uHalfW, gl_FragCoord.x);
-          float overAmt = mix(texture2D(uVisTex, uv, uBlur).g, texture2D(uVisTex2, uv, uBlur).g, isRight) * (uMaskStrength / 100.0);
+          float overAmt = mix(texture2D(uVisTex, uv).g, texture2D(uVisTex2, uv).g, isRight) * (uMaskStrength / 100.0);
           gl_FragColor = vec4(vec3(1.0), overAmt);
         }
       `,
@@ -1469,7 +1497,6 @@ function createFlashlight() {
         uVisTex2: { value: null },
         uHalfW: { value: 512 },
         uBufH: { value: 512 },
-        uBlur: { value: lightBlur },
         uMaskStrength: { value: maskStrength }
       },
       transparent: true,
@@ -1771,6 +1798,28 @@ function renderFlashlightShadow(r) {
       r.render(spotGroup, camR);
     }
     for (const m of _thruHidden) m.visible = true;
+    // Gaussian blur of the vis field (LIGHT BLUR): two separable passes per eye.
+    if (lightBlur > 0) {
+      const stepUv = lightBlur * 0.64 / 512;
+      blurMat.uniforms.uDir.value.set(stepUv, 0);
+      blurMat.uniforms.tex.value = visRT.texture;
+      r.setRenderTarget(blurTmpRT);
+      r.render(blurScene, blurCam);
+      blurMat.uniforms.uDir.value.set(0, stepUv);
+      blurMat.uniforms.tex.value = blurTmpRT.texture;
+      r.setRenderTarget(visBlurRT);
+      r.render(blurScene, blurCam);
+      if (camR && visRT2) {
+        blurMat.uniforms.uDir.value.set(stepUv, 0);
+        blurMat.uniforms.tex.value = visRT2.texture;
+        r.setRenderTarget(blurTmpRT);
+        r.render(blurScene, blurCam);
+        blurMat.uniforms.uDir.value.set(0, stepUv);
+        blurMat.uniforms.tex.value = blurTmpRT.texture;
+        r.setRenderTarget(visBlurRT2);
+        r.render(blurScene, blurCam);
+      }
+    }
     r.setRenderTarget(prevTarget);
     r.xr.enabled = xrEnabled;
     receiverMat.colorWrite = false;
