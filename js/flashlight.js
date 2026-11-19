@@ -117,8 +117,6 @@ export function receiverShaders(cfg = FLASH, opts = {}) {
       float ndc = z * 2.0 - 1.0;
       return 2.0 * NEAR * RANGE / (RANGE + NEAR - ndc * (RANGE - NEAR));
     }
-    layout(location = 1) out highp vec4 pc_fragGeo;
-    layout(location = 2) out highp vec4 pc_fragNrm;
     void main() {
       vec3 toL = uLightPos - vWorld;
       float d = length(toL);
@@ -137,39 +135,30 @@ export function receiverShaders(cfg = FLASH, opts = {}) {
       float visibility = falloffFactor * fadeFactor;
       float shape = fadeFactor;
       
-      // Keep the cone-margin discard as the FIRST check
-      if (d > RANGE || coneDot < CONE_COS - 0.2) discard;
+      if (visibility <= 0.0 || d > RANGE || coneDot < CONE_COS - 0.2) discard;
       
       // Flat geometric normal from screen derivatives (no normal attribute needed),
       // oriented toward the viewer: we can only see the lit side if the light is on our side.
       vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
       if (dot(N, cameraPosition - vWorld) < 0.0) N = -N;
       float ndl = dot(N, L);
-      
-      // Compute lit flag instead of discarding
-      float lit = 1.0;
       #ifndef THRU
-      if (ndl <= 0.0) lit = 0.0;
+      if (ndl <= 0.0) discard;
       #endif
+      vec4 lc = uLightVP * vec4(vWorld, 1.0);
+      vec2 uv = lc.xy / lc.w * 0.5 + 0.5;
+      float occ = linZ(texture2D(uShadow, uv).r);
+      float tanT = min(sqrt(max(1.0 - ndl * ndl, 0.0)) / ndl, MAX_SLOPE);
+      if (lc.w - occ > BIAS_CONST + BIAS_SLOPE * lc.w * tanT) discard;
       
-      // Shadow fetch must be gated on visibility > 0.0 to preserve the perf skip for out-of-fade pixels
-      if (visibility > 0.0) {
-        vec4 lc = uLightVP * vec4(vWorld, 1.0);
-        vec2 uv = lc.xy / lc.w * 0.5 + 0.5;
-        float occ = linZ(texture2D(uShadow, uv).r);
-        float tanT = min(sqrt(max(1.0 - ndl * ndl, 0.0)) / ndl, MAX_SLOPE);
-        if (lc.w - occ > BIAS_CONST + BIAS_SLOPE * lc.w * tanT) lit = 0.0;
-      }
-      
-      // Multiply lit flag into visibility and overShape
-      visibility *= lit;
-      float overShape = shape * clamp(1.0 - d / uOverReach, 0.0, 1.0) * step(0.0001, uOverReach) * lit;
-      
-      // Write geometry outputs for every surviving in-cone fragment (lit or not)
-      pc_fragGeo = vec4(vWorld, 1.0);   // world position, a=1 marks valid
-      pc_fragNrm = vec4(N, 1.0);        // world normal
-      // R = distance from flashlight (normalized to RANGE), no longer used by consumers
-      gl_FragColor = vec4(min(d / RANGE, 1.0), overShape, uClass, visibility);
+      // G = over-bright amount: the beam's FULL shape (cone edge + fade + N·L,
+      // same dimensions as the main light) scaled by the FLASH OVER linear reach
+      // (white at the lamp, zero at uOverReach). A = full visibility (with the
+      // distance falloff) for the darkness removal.
+      float overShape = shape * clamp(1.0 - d / uOverReach, 0.0, 1.0) * step(0.0001, uOverReach);
+      // B = surface class: 1 = dynamic mesh (furniture), 0 = structure
+      // (walls / floor / ceiling / monster). Gates where the blur applies.
+      gl_FragColor = vec4(0.0, overShape, uClass, visibility);
     }`;
   return { vertexShader, fragmentShader };
 }
