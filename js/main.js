@@ -1612,6 +1612,19 @@ function updateBeamGlow() {
     beamGlow.userData.len = beamLen;
     beamGlow.visible = false;
     beamGlow.renderOrder = 2005;   // draw AFTER the darkness passes — else the darkness overlay paints over the beam
+    // STOP AT OBJECTS: the room's depth-only occluders (walls/floor/furniture,
+    // scene mesh on Quest) are written into the depth buffer again right before
+    // the beam draws, so the beam's depth test truncates it at the first real
+    // surface — the same limit the light itself stops at. Nested-render state is
+    // saved/restored like the shadow/vis passes.
+    beamGlow.onBeforeRender = function (r, sc, cam) {
+      if (!casterScene) return;
+      const _xr = r.xr.enabled; r.xr.enabled = false;
+      const _ac = r.autoClear; r.autoClear = false;
+      r.render(casterScene, cam);
+      r.autoClear = _ac;
+      r.xr.enabled = _xr;
+    };
     flashlightModel.add(beamGlow);
   }
   
