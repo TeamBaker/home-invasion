@@ -1346,10 +1346,12 @@ function createFlashlight() {
   blurTmpRT = new THREE.WebGLRenderTarget(512, 512, { depthBuffer: false, stencilBuffer: false, generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
   blurCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   blurMat = new THREE.ShaderMaterial({
-    uniforms: { tex: { value: null }, uDir: { value: new THREE.Vector2() } },
+    uniforms: { tex: { value: null }, uOrig: { value: null }, uFinal: { value: 0 }, uDir: { value: new THREE.Vector2() } },
     vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
     fragmentShader: `
       uniform sampler2D tex;
+      uniform sampler2D uOrig;
+      uniform float uFinal;
       uniform vec2 uDir;
       varying vec2 vUv;
       void main() {
@@ -1357,7 +1359,15 @@ function createFlashlight() {
         sum += (texture2D(tex, vUv + uDir * 1.3846) + texture2D(tex, vUv - uDir * 1.3846)) * 0.316216;
         sum += (texture2D(tex, vUv + uDir * 3.2308) + texture2D(tex, vUv - uDir * 3.2308)) * 0.070270;
         float cls = texture2D(tex, vUv).b;   // class channel: never blurred
-        gl_FragColor = vec4(0.0, sum.g, cls, sum.a);
+        vec4 result = sum;
+        if (uFinal > 0.5) {
+          // One-sided blur: darkness intrudes on the bright, never the reverse —
+          // the lit side loses its halo; the dark side keeps its hard edge.
+          vec4 orig = texture2D(uOrig, vUv);
+          result.a = min(orig.a, result.a);
+          result.g = min(orig.g, result.g);
+        }
+        gl_FragColor = vec4(0.0, result.g, cls, result.a);
       }`,
     depthTest: false,
     depthWrite: false
@@ -1863,19 +1873,25 @@ function renderFlashlightShadow(r) {
     // Gaussian blur of the vis field (LIGHT BLUR): two separable passes per eye.
     if (lightBlur > 0) {
       const stepUv = lightBlur * 0.64 / 512;
+      blurMat.uniforms.uFinal.value = 0;
       blurMat.uniforms.uDir.value.set(stepUv, 0);
       blurMat.uniforms.tex.value = visRT.texture;
       r.setRenderTarget(blurTmpRT);
       r.render(blurScene, blurCam);
+      blurMat.uniforms.uFinal.value = 1;
+      blurMat.uniforms.uOrig.value = visRT.texture;
       blurMat.uniforms.uDir.value.set(0, stepUv);
       blurMat.uniforms.tex.value = blurTmpRT.texture;
       r.setRenderTarget(visBlurRT);
       r.render(blurScene, blurCam);
       if (camR && visRT2) {
+        blurMat.uniforms.uFinal.value = 0;
         blurMat.uniforms.uDir.value.set(stepUv, 0);
         blurMat.uniforms.tex.value = visRT2.texture;
         r.setRenderTarget(blurTmpRT);
         r.render(blurScene, blurCam);
+        blurMat.uniforms.uFinal.value = 1;
+        blurMat.uniforms.uOrig.value = visRT2.texture;
         blurMat.uniforms.uDir.value.set(0, stepUv);
         blurMat.uniforms.tex.value = blurTmpRT.texture;
         r.setRenderTarget(visBlurRT2);
