@@ -1612,6 +1612,21 @@ function updateBeamGlow() {
     beamGlow.userData.len = beamLen;
     beamGlow.visible = false;
     beamGlow.renderOrder = 2005;   // draw AFTER the darkness passes — else the darkness overlay paints over the beam
+    // Depth pre-pass: write the real occluders (walls/floor/furniture/monster —
+    // including the transparent room meshes that never write depth themselves)
+    // into the depth buffer just before the beam draws, so the beam hides
+    // inside/behind geometry instead of rendering over it. casterMat is
+    // colorWrite:false and depth-writing, so only depth changes. XR off during
+    // nested renders (same rule as the shadow/vis passes); autoClear off so the
+    // frame is not cleared.
+    beamGlow.onBeforeRender = function (r, sc, cam) {
+      if (!casterScene) return;
+      const _xr = r.xr.enabled; r.xr.enabled = false;
+      const _ac = r.autoClear; r.autoClear = false;
+      r.render(casterScene, cam);
+      r.autoClear = _ac;
+      r.xr.enabled = _xr;
+    };
     flashlightModel.add(beamGlow);
   }
   
