@@ -1597,41 +1597,72 @@ function updateBeamGlow() {
     beamGeom.translate(0, -length / 2, 0);
     beamGeom.rotateX(Math.PI / 2);
     
+    // Shadow-bias constants, same source as the receiver shader (flashlight.js FLASH).
+    const beamBiasSlope = (FLASH.biasSlopeTexels * (2 * Math.tan(((FLASH.coneAngle + FLASH.fovMargin) * Math.PI) / 360)) / FLASH.shadowRes).toExponential(6);
+    // The beam exists ONLY where the light itself reaches: each fragment projects
+    // into the flashlight's shadow map (the same map the receivers sample) and is
+    // discarded when the light is blocked on the way to it. The caster set behind
+    // that map already follows SHINE THRU FURNITURE, so the beam stops at walls,
+    // the floor and the monster — and at furniture exactly when the light does —
+    // with no occlusion system of its own. The old nested depth pre-pass is gone:
+    // the shadow map already holds everything it wrote, and nested renders inside
+    // the XR frame are the known Quest corruption class.
     beamGlow = new THREE.Mesh(
       beamGeom,
-      new THREE.MeshBasicMaterial({
-        color: 0xffffff,
+      new THREE.ShaderMaterial({
         transparent: true,
-        opacity: 0.15,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
-        depthTest: true,   // occlude the beam behind walls/furniture; overlays don't write depth
-        side: THREE.DoubleSide
+        depthTest: false,   // occlusion is the shadow-map test below — the main depth buffer would wrongly stop the beam at furniture while SHINE THRU is on
+        side: THREE.DoubleSide,
+        uniforms: Object.assign({}, receiverMat.uniforms, { uOpacity: { value: 0.15 } }),
+        vertexShader: `
+          varying vec3 vWorld;
+          void main() {
+            vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }`,
+        fragmentShader: `
+          uniform vec3 uLightPos;
+          uniform vec3 uLightDir;
+          uniform mat4 uLightVP;
+          uniform sampler2D uShadow;
+          uniform float uDist;
+          uniform float uOpacity;
+          varying vec3 vWorld;
+          const float RANGE = ${FLASH.range.toFixed(1)};
+          const float NEAR = ${FLASH.near};
+          const float BIAS_CONST = ${FLASH.biasConst};
+          const float BIAS_SLOPE = ${beamBiasSlope};
+          const float MAX_SLOPE = ${FLASH.maxSlope.toFixed(1)};
+          float linZ(float z) {
+            float ndc = z * 2.0 - 1.0;
+            return 2.0 * NEAR * RANGE / (RANGE + NEAR - ndc * (RANGE - NEAR));
+          }
+          void main() {
+            vec3 toL = uLightPos - vWorld;
+            float d = length(toL);
+            if (d > uDist) discard;   // the beam ends at the light's falloff distance
+            vec3 L = toL / d;
+            float coneDot = dot(-L, uLightDir);
+            float tanT = min(sqrt(max(1.0 - coneDot * coneDot, 0.0)) / coneDot, MAX_SLOPE);
+            vec4 lc = uLightVP * vec4(vWorld, 1.0);
+            vec2 uv = lc.xy / lc.w * 0.5 + 0.5;
+            float occ = linZ(texture2D(uShadow, uv).r);
+            if (lc.w - occ > BIAS_CONST + BIAS_SLOPE * lc.w * tanT) discard;   // the light is blocked on the way here — no beam
+            gl_FragColor = vec4(1.0, 1.0, 1.0, uOpacity);
+          }`,
       })
     );
     beamGlow.userData.len = beamLen;
     beamGlow.visible = false;
     beamGlow.renderOrder = 2005;   // draw AFTER the darkness passes — else the darkness overlay paints over the beam
-    // STOP AT OBJECTS: the room's depth-only occluders (walls/floor/furniture,
-    // scene mesh on Quest) are written into the depth buffer again right before
-    // the beam draws, so the beam's depth test truncates it at the first real
-    // surface — the same limit the light itself stops at. Nested-render state is
-    // saved/restored like the shadow/vis passes.
-    beamGlow.onBeforeRender = function (r, sc, cam) {
-      if (!casterScene) return;
-      if (r.xr.isPresenting) return;   // Quest: never nested-render inside the XR frame. XR eye cameras carry pose only in matrixWorld; r.render()'s updateMatrixWorld collapses them to origin, so this pass wrote garbage depth and the beam stopped stopping. While presenting, the room's depth-only occluders already wrote the depth the beam tests against.
-      const _xr = r.xr.enabled; r.xr.enabled = false;
-      const _ac = r.autoClear; r.autoClear = false;
-      r.render(casterScene, cam);
-      r.autoClear = _ac;
-      r.xr.enabled = _xr;
-    };
     flashlightModel.add(beamGlow);
   }
   
   if (beamGlow) {
     beamGlow.visible = flashBeam && flashlightMode;
-    beamGlow.material.opacity = (beamGlowLevel / 100) * 0.9;   // BEAM GLOW setting (must read over bright passthrough)
+    beamGlow.material.uniforms.uOpacity.value = (beamGlowLevel / 100) * 0.9;   // BEAM GLOW setting (must read over bright passthrough)
   }
 }
 
