@@ -1614,7 +1614,7 @@ function updateBeamGlow() {
         blending: THREE.AdditiveBlending,
         depthWrite: false,
         depthTest: false,   // occlusion is the shadow-map test below — the main depth buffer would wrongly stop the beam at furniture while SHINE THRU is on
-        side: THREE.DoubleSide,
+        side: THREE.BackSide,   // only the sight ray's EXIT crossing draws — exactly one shaded fragment per pixel, so the chord brightness is never double-counted
         uniforms: Object.assign({}, receiverMat.uniforms, { uOpacity: { value: 0.15 } }),
         vertexShader: `
           varying vec3 vWorld;
@@ -1635,6 +1635,7 @@ function updateBeamGlow() {
           const float BIAS_CONST = ${FLASH.biasConst};
           const float BIAS_SLOPE = ${beamBiasSlope};
           const float MAX_SLOPE = ${FLASH.maxSlope.toFixed(1)};
+          const float TAN_HALF = ${(Math.tan((FLASH.coneAngle / 2) * Math.PI / 180)).toFixed(6)};
           float linZ(float z) {
             float ndc = z * 2.0 - 1.0;
             return 2.0 * NEAR * RANGE / (RANGE + NEAR - ndc * (RANGE - NEAR));
@@ -1649,8 +1650,53 @@ function updateBeamGlow() {
             vec4 lc = uLightVP * vec4(vWorld, 1.0);
             vec2 uv = lc.xy / lc.w * 0.5 + 0.5;
             float occ = linZ(texture2D(uShadow, uv).r);
-            if (lc.w - occ > BIAS_CONST + BIAS_SLOPE * lc.w * tanT) discard;   // the light is blocked on the way here — no beam
-            gl_FragColor = vec4(1.0, 1.0, 1.0, uOpacity);
+            // ── per-pixel THICKNESS ──
+            // Brightness = how much glowing beam this pixel looks THROUGH: the
+            // sight ray's chord inside the beam cone, clipped to where the light
+            // still reaches. wMax is the shadow map's blocker depth for this
+            // sight ray (exact for rays parallel to the beam axis — the hand-held
+            // case — a good estimate obliquely, since the blocker surface is
+            // sampled at this ray's own light-space cell). Zero at the grazing
+            // silhouette, thickest looking straight into the beam.
+            vec3 ro = cameraPosition;
+            vec3 rd = normalize(vWorld - ro);
+            vec3 b = ro - uLightPos;
+            float da = dot(rd, uLightDir);
+            float wb = dot(b, uLightDir);
+            float wMax = occ + BIAS_CONST + BIAS_SLOPE * occ * tanT;
+            // axial slab of the finite cone: w(t) = wb + t·da within [0, uDist]
+            float tw0 = (0.0 - wb) / da;
+            float tw1 = (uDist - wb) / da;
+            float s0 = max(min(tw0, tw1), 0.0);
+            float s1 = max(tw0, tw1);
+            float enter, leave;
+            float A2 = 1.0 - da * da;
+            if (A2 < 1e-5) {
+              // sight ray (almost) parallel to the axis: constant perpendicular
+              // offset p; inside the cone where it has widened past p (w ≥ p/tan).
+              float p = sqrt(max(dot(b, b) - wb * wb, 0.0));
+              float tp = (p / TAN_HALF - wb) / da;
+              if (da > 0.0) { enter = max(s0, tp); leave = s1; }
+              else          { enter = s0; leave = min(s1, tp); }
+            } else {
+              // ray–cone quadric: perp² − w²·tan²(half-angle) = 0
+              float B2 = dot(b, rd) - wb * da;
+              float C2 = dot(b, b) - wb * wb - wb * wb * TAN_HALF * TAN_HALF;
+              float disc = B2 * B2 - A2 * C2;
+              if (disc < 0.0) discard;   // grazing silhouette — nothing to show
+              float sq = sqrt(disc);
+              enter = (-B2 - sq) / A2;
+              leave = (-B2 + sq) / A2;
+            }
+            float E = max(enter, s0);
+            float X = min(leave, s1);
+            // clip the chord to the LIT part: w(t) ≤ wMax
+            float tLit = (wMax - wb) / da;
+            float litStart = da > 0.0 ? E : max(E, tLit);
+            float litEnd   = da > 0.0 ? min(X, tLit) : X;
+            float chordLit = max(litEnd - litStart, 0.0);
+            if (chordLit <= 0.0) discard;
+            gl_FragColor = vec4(1.0, 1.0, 1.0, uOpacity * clamp(chordLit / uDist, 0.0, 1.0));
           }`,
       })
     );
