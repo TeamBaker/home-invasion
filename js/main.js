@@ -1605,7 +1605,7 @@ function updateBeamGlow() {
         opacity: 0.15,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
-        depthTest: false,
+        depthTest: true,   // occlude the beam behind walls/furniture; overlays don't write depth
         side: THREE.DoubleSide
       })
     );
