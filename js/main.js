@@ -1592,7 +1592,7 @@ function updateBeamGlow() {
     }
     // Create beam glow effect
     const length = beamLen;
-    const radius = length * Math.tan(FLASH.coneAngle / 2);
+    const radius = length * Math.tan((FLASH.coneAngle / 2) * Math.PI / 180);
     const beamGeom = new THREE.ConeGeometry(radius, length, 16);
     beamGeom.translate(0, -length / 2, 0);
     beamGeom.rotateX(Math.PI / 2);
