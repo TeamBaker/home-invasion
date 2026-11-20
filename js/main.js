@@ -669,7 +669,7 @@ let flashBeam = _storedBeam === null ? false : _storedBeam === '1';  // beam glo
 const _storedThru = localStorage.getItem('mrh-flash-thru2');
 let flashThruFurniture = _storedThru === null ? false : _storedThru === '1';  // ON: furniture is invisible to the flashlight (visual occlusion only)
 const _storedBlur = localStorage.getItem('mrh-light-blur');
-let lightBlur = _storedBlur === null ? 6 : Math.max(0, Math.min(20, Math.round(+(_storedBlur) || 20)));  // Gaussian blur strength for the vis field: higher = softer lit/unlit transition
+let lightBlur = _storedBlur === null ? 6 : Math.max(0, Math.min(20, Math.round(+(_storedBlur) || 6)));  // Gaussian blur strength for the vis field: higher = softer lit/unlit transition
 const _storedBlurDyn = localStorage.getItem('mrh-blur-dyn');
 let blurDynOnly = _storedBlurDyn === null ? true : _storedBlurDyn === '1';  // ON: the blur only softens the dynamic mesh (furniture); OFF: it softens everything
 const _storedGlow = localStorage.getItem('mrh-beam-glow');
