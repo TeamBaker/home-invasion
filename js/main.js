@@ -1619,6 +1619,7 @@ function updateBeamGlow() {
     // saved/restored like the shadow/vis passes.
     beamGlow.onBeforeRender = function (r, sc, cam) {
       if (!casterScene) return;
+      if (r.xr.isPresenting) return;   // Quest: never nested-render inside the XR frame. XR eye cameras carry pose only in matrixWorld; r.render()'s updateMatrixWorld collapses them to origin, so this pass wrote garbage depth and the beam stopped stopping. While presenting, the room's depth-only occluders already wrote the depth the beam tests against.
       const _xr = r.xr.enabled; r.xr.enabled = false;
       const _ac = r.autoClear; r.autoClear = false;
       r.render(casterScene, cam);
