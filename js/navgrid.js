@@ -39,14 +39,19 @@ export class NavGrid {
     this.path = [];         // last planned path (array of {x,z}) — for debug drawing
     this.targetCell = -1;
     this.targetVersion = -1;
+    this.targetIsPlayer = false;
+    this.lastTargetCell = -1;
+    this.lastTargetX = 0;
+    this.lastTargetZ = 0;
   }
 
   /**
-   * @param room {floors:[{pts:[{x,z}]}], walls:[[x0,z0,x1,z1]], solids:[{pts:[{x,z}]}], points?:Float32Array(x,z,...)}
+   * @param room {floors:[{pts:[{x,z}]}], walls:[[x0,z0,x1,z1]], solids:[{pts:[{x,z}]}], points?:Float32Array(x,z,...),
+   *              open?:[{pts:[{x,z}]}]}  open = doorway footprints: walkable floor, nothing rasterizes inside them
    * @param focus {x,z} a point that must be inside the grid (the player)
    */
   build(room, focus = { x: 0, z: 0 }) {
-    const { floors = [], walls = [], solids = [], points = null } = room;
+    const { floors = [], walls = [], solids = [], points = null, open = [] } = room;
     let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
     const grow = (x, z) => {
       if (x < minX) minX = x; if (x > maxX) maxX = x;
@@ -55,6 +60,7 @@ export class NavGrid {
     for (const f of floors) for (const p of f.pts) grow(p.x, p.z);
     for (const s of solids) for (const p of s.pts) grow(p.x, p.z);
     for (const w of walls) { grow(w[0], w[1]); grow(w[2], w[3]); }
+    for (const o of open) for (const p of o.pts) grow(p.x, p.z);
     if (points) for (let i = 0; i < points.length; i += 2) grow(points[i], points[i + 1]);
 
     if (minX === Infinity) { this.ok = false; return false; }   // no room data at all
@@ -85,6 +91,9 @@ export class NavGrid {
       const k = this.cellOf(points[i], points[i + 1]);
       if (k >= 0) raw[k] = OBSTACLE;
     }
+    // Doorways last: the floor polygons of the two rooms stop at their walls (the doorway
+    // threshold is outside both), and furniture planes / jamb strokes reach into it.
+    for (const o of open) this._fillPoly(o.pts, FREE, true);
 
     // Inflate by the monster's radius.
     const block = this.block = new Uint8Array(n);
@@ -110,7 +119,7 @@ export class NavGrid {
   }
 
   // ── rasterizers ──
-  _fillPoly(pts, value) {
+  _fillPoly(pts, value, force = false) {
     let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
     for (const p of pts) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); z0 = Math.min(z0, p.z); z1 = Math.max(z1, p.z); }
     const c = this.cell;
@@ -118,7 +127,7 @@ export class NavGrid {
     const cz0 = Math.max(0, Math.floor((z0 - this.minZ) / c)), cz1 = Math.min(this.h - 1, Math.floor((z1 - this.minZ) / c));
     for (let z = cz0; z <= cz1; z++) for (let x = cx0; x <= cx1; x++) {
       const k = z * this.w + x;
-      if (value === FREE && this.raw[k] === OBSTACLE) continue;
+      if (value === FREE && !force && this.raw[k] === OBSTACLE) continue;
       if (pointInPoly(this.minX + (x + 0.5) * c, this.minZ + (z + 0.5) * c, pts)) this.raw[k] = value;
     }
   }
@@ -184,8 +193,26 @@ export class NavGrid {
   setTarget(x, z) {
     if (!this.ok) return;
     let k = this.cellOf(x, z);
-    if (k < 0 || this.block[k]) k = this.nearestFreeCell(x, z, 1.5);
-    if (k === this.targetCell && this.targetVersion === this.version) return;
+    let isPlayer = false;
+    if (k >= 0 && !this.block[k]) {
+      isPlayer = true;
+    } else {
+      k = this.nearestFreeCell(x, z, 1.5);
+      if (k < 0 && this.lastTargetCell >= 0) {
+        // Player is in unmapped space: keep chasing the last known target (by position,
+        // since cell indices change when the grid rebuilds). Drop it if now blocked.
+        const lk = this.cellOf(this.lastTargetX, this.lastTargetZ);
+        if (lk >= 0 && !this.block[lk]) k = lk;
+        else this.lastTargetCell = -1;
+      }
+    }
+    if (k >= 0) {
+      this.lastTargetCell = k;
+      this.lastTargetX = this.centerX(k);
+      this.lastTargetZ = this.centerZ(k);
+    }
+    if (k === this.targetCell && this.targetVersion === this.version && isPlayer === this.targetIsPlayer) return;
+    this.targetIsPlayer = isPlayer;
     this.targetCell = k;
     this.targetVersion = this.version;
     const { dist, queue, block, w, h } = this;
@@ -207,11 +234,19 @@ export class NavGrid {
     }
   }
 
-  /** Approximate walking distance (m) from here to the target, Infinity if unreachable. */
+  /** Approximate walking distance (m) from here to the target, Infinity if unreachable.
+   *  A point inside the body-radius margin (wall corners, floor-polygon corners) is
+   *  measured from the nearest cell the monster's centre can occupy within that radius. */
   pathLength(x, z) {
     if (!this.ok) return Math.hypot(x, z);
-    const k = this.cellOf(x, z);
-    return k < 0 || this.dist[k] < 0 ? Infinity : this.dist[k] * this.cell;
+    let k = this.cellOf(x, z);
+    if (k < 0) return Infinity;
+    if (this.block[k]) {
+      const f = this.nearestFreeCell(x, z, this.radius + this.cell);
+      if (f < 0 || this.dist[f] < 0) return Infinity;
+      return this.dist[f] * this.cell + Math.hypot(this.centerX(f) - x, this.centerZ(f) - z);
+    }
+    return this.dist[k] < 0 ? Infinity : this.dist[k] * this.cell;
   }
 
   /**

@@ -13,8 +13,12 @@
 // the room "comes with you" and the monster is re-constrained to wherever it now is.
 
 import * as THREE from 'three';
-import { RoomSense } from './room.js';
-import { FLASH, shadowFov, receiverShaders } from './flashlight.js';
+import { RoomSense } from '#room';
+import { FLASH, shadowFov, receiverShaders } from '#flashlight';
+import { serializeScan } from '#scandump';
+
+// Build tag of the code that is actually running (index.html loads main.js?v=<tag>).
+const BUILD = new URL(import.meta.url).searchParams.get('v') || 'unversioned';
 
 // ───────────────────────────── config ─────────────────────────────
 const CFG = {
@@ -390,6 +394,7 @@ class Monster {
     this.root = new THREE.Group();
     this.body = new THREE.Group();
     this.root.add(this.body);
+    this.root.scale.setScalar(0.75);   // shorter guy
 
     const hipY = 1.24;
     this.hips = new THREE.Group();
@@ -577,7 +582,7 @@ addEventListener('keydown', (e) => {
   // While the panel is open, arrows/Enter drive the panel instead of the game.
   if (settingsPanelOpen) {
     if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
-      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 10);
+      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 11);
       updateSettingsPanel();
       return;
     }
@@ -631,7 +636,7 @@ addEventListener('keydown', (e) => {
       } else if (settingsCursor === 10) {
         blurDynOnly = !blurDynOnly;
         localStorage.setItem('mrh-blur-dyn', blurDynOnly ? '1' : '0');
-      }
+      } else if (settingsCursor === 11) saveScan();
       updateSettingsPanel();
       return;
     }
@@ -715,6 +720,36 @@ let turnSuppressed = false;
 let settingsBtnWasDown = false;
 let settingsStickWasZero = true;
 let settingsTriggerWasDown = false;
+let saveScanStatus = '';       // SAVE SCAN row feedback ('' = normal label)
+let saveScanBusy = false;
+let saveScanTimer = 0;
+
+// SAVE SCAN: serialize what Quest reported (room.model) and POST it to <origin>/upload (server.py).
+async function saveScan() {
+  if (saveScanBusy) return;
+  saveScanBusy = true;
+  clearTimeout(saveScanTimer);
+  saveScanStatus = 'SAVING...';
+  updateSettingsPanel();
+  try {
+    const payload = serializeScan(room.model, { source: room.source, userAgent: navigator.userAgent, build: BUILD });
+    const res = await fetch('/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    let info = null;
+    try { info = await res.json(); } catch (_) { /* non-JSON reply (e.g. plain http.server 501) */ }
+    if (!res.ok || !info || !info.ok) throw new Error((info && info.error) || ('HTTP ' + res.status));
+    saveScanStatus = 'SAVED ' + info.file;
+  } catch (err) {
+    console.warn('save scan failed:', err);
+    saveScanStatus = 'UPLOAD FAILED: ' + String((err && err.message) || err).slice(0, 40);
+  }
+  saveScanBusy = false;
+  updateSettingsPanel();
+  saveScanTimer = setTimeout(() => { saveScanStatus = ''; updateSettingsPanel(); }, 4000);
+}
 
 
 // Desktop mouse look (pointer lock).
@@ -766,7 +801,7 @@ function readInput() {
           } else if (settingsCursor === 10) {
             blurDynOnly = !blurDynOnly;
             localStorage.setItem('mrh-blur-dyn', blurDynOnly ? '1' : '0');
-          }
+          } else if (settingsCursor === 11) saveScan();
           updateSettingsPanel();
         }
         settingsTriggerWasDown = triggerDown;
@@ -779,7 +814,7 @@ function readInput() {
 
           if (stickMoved && settingsStickWasZero) {
             if (Math.abs(stickY) > Math.abs(stickX)) {
-              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(10, settingsCursor + 1);
+              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(11, settingsCursor + 1);
               updateSettingsPanel();
             } else if (settingsCursor === 1) {
               roomBrightness = Math.max(0, Math.min(100, roomBrightness + (stickX > 0 ? 1 : -1)));
@@ -1023,7 +1058,7 @@ function updateMonster(dt) {
 
   // Progress check: if the walking distance to you isn't shrinking, it's stuck.
   const expected = speed * dt;
-  stuckTime = (wp.mode === 'blocked' || moved < expected * 0.25) ? stuckTime + dt : Math.max(0, stuckTime - dt * 2);
+  stuckTime = (nav.targetIsPlayer && (wp.mode === 'blocked' || moved < expected * 0.25)) ? stuckTime + dt : Math.max(0, stuckTime - dt * 2);
 
   // Stand on the detected floor and turn to face the direction of travel (in world space).
   _mL.y = room.floorAt(_mL.x, _mL.z);
@@ -1592,21 +1627,112 @@ function updateBeamGlow() {
     }
     // Create beam glow effect
     const length = beamLen;
-    const radius = length * Math.tan(FLASH.coneAngle / 2);
+    const radius = length * Math.tan((FLASH.coneAngle / 2) * Math.PI / 180);
     const beamGeom = new THREE.ConeGeometry(radius, length, 16);
     beamGeom.translate(0, -length / 2, 0);
     beamGeom.rotateX(Math.PI / 2);
     
+    // Shadow-bias constants, same source as the receiver shader (flashlight.js FLASH).
+    const beamBiasSlope = (FLASH.biasSlopeTexels * (2 * Math.tan(((FLASH.coneAngle + FLASH.fovMargin) * Math.PI) / 360)) / FLASH.shadowRes).toExponential(6);
+    // The beam exists ONLY where the light itself reaches: each fragment projects
+    // into the flashlight's shadow map (the same map the receivers sample) and is
+    // discarded when the light is blocked on the way to it. The caster set behind
+    // that map already follows SHINE THRU FURNITURE, so the beam stops at walls,
+    // the floor and the monster — and at furniture exactly when the light does —
+    // with no occlusion system of its own. The old nested depth pre-pass is gone:
+    // the shadow map already holds everything it wrote, and nested renders inside
+    // the XR frame are the known Quest corruption class.
     beamGlow = new THREE.Mesh(
       beamGeom,
-      new THREE.MeshBasicMaterial({
-        color: 0xffffff,
+      new THREE.ShaderMaterial({
         transparent: true,
-        opacity: 0.15,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
-        depthTest: false,
-        side: THREE.DoubleSide
+        depthTest: false,   // occlusion is the shadow-map test below — the main depth buffer would wrongly stop the beam at furniture while SHINE THRU is on
+        side: THREE.BackSide,   // only the sight ray's EXIT crossing draws — exactly one shaded fragment per pixel, so the chord brightness is never double-counted
+        uniforms: Object.assign({}, receiverMat.uniforms, { uOpacity: { value: 0.15 } }),
+        vertexShader: `
+          varying vec3 vWorld;
+          void main() {
+            vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }`,
+        fragmentShader: `
+          uniform vec3 uLightPos;
+          uniform vec3 uLightDir;
+          uniform mat4 uLightVP;
+          uniform sampler2D uShadow;
+          uniform float uDist;
+          uniform float uOpacity;
+          varying vec3 vWorld;
+          const float RANGE = ${FLASH.range.toFixed(1)};
+          const float NEAR = ${FLASH.near};
+          const float BIAS_CONST = ${FLASH.biasConst};
+          const float BIAS_SLOPE = ${beamBiasSlope};
+          const float MAX_SLOPE = ${FLASH.maxSlope.toFixed(1)};
+          const float TAN_HALF = ${(Math.tan((FLASH.coneAngle / 2) * Math.PI / 180)).toFixed(6)};
+          float linZ(float z) {
+            float ndc = z * 2.0 - 1.0;
+            return 2.0 * NEAR * RANGE / (RANGE + NEAR - ndc * (RANGE - NEAR));
+          }
+          void main() {
+            vec3 toL = uLightPos - vWorld;
+            float d = length(toL);
+            if (d > uDist) discard;   // the beam ends at the light's falloff distance
+            vec3 L = toL / d;
+            float coneDot = dot(-L, uLightDir);
+            float tanT = min(sqrt(max(1.0 - coneDot * coneDot, 0.0)) / coneDot, MAX_SLOPE);
+            vec4 lc = uLightVP * vec4(vWorld, 1.0);
+            vec2 uv = lc.xy / lc.w * 0.5 + 0.5;
+            float occ = linZ(texture2D(uShadow, uv).r);
+            // ── per-pixel THICKNESS ──
+            // Brightness = how much glowing beam this pixel looks THROUGH: the
+            // sight ray's chord inside the beam cone, clipped to where the light
+            // still reaches. wMax is the shadow map's blocker depth for this
+            // sight ray (exact for rays parallel to the beam axis — the hand-held
+            // case — a good estimate obliquely, since the blocker surface is
+            // sampled at this ray's own light-space cell). Zero at the grazing
+            // silhouette, thickest looking straight into the beam.
+            vec3 ro = cameraPosition;
+            vec3 rd = normalize(vWorld - ro);
+            vec3 b = ro - uLightPos;
+            float da = dot(rd, uLightDir);
+            float wb = dot(b, uLightDir);
+            float wMax = occ + BIAS_CONST + BIAS_SLOPE * occ * tanT;
+            // axial slab of the finite cone: w(t) = wb + t·da within [0, uDist]
+            float tw0 = (0.0 - wb) / da;
+            float tw1 = (uDist - wb) / da;
+            float s0 = max(min(tw0, tw1), 0.0);
+            float s1 = max(tw0, tw1);
+            float enter, leave;
+            float A2 = 1.0 - da * da;
+            if (A2 < 1e-5) {
+              // sight ray (almost) parallel to the axis: constant perpendicular
+              // offset p; inside the cone where it has widened past p (w ≥ p/tan).
+              float p = sqrt(max(dot(b, b) - wb * wb, 0.0));
+              float tp = (p / TAN_HALF - wb) / da;
+              if (da > 0.0) { enter = max(s0, tp); leave = s1; }
+              else          { enter = s0; leave = min(s1, tp); }
+            } else {
+              // ray–cone quadric: perp² − w²·tan²(half-angle) = 0
+              float B2 = dot(b, rd) - wb * da;
+              float C2 = dot(b, b) - wb * wb - wb * wb * TAN_HALF * TAN_HALF;
+              float disc = B2 * B2 - A2 * C2;
+              if (disc < 0.0) discard;   // grazing silhouette — nothing to show
+              float sq = sqrt(disc);
+              enter = (-B2 - sq) / A2;
+              leave = (-B2 + sq) / A2;
+            }
+            float E = max(enter, s0);
+            float X = min(leave, s1);
+            // clip the chord to the LIT part: w(t) ≤ wMax
+            float tLit = (wMax - wb) / da;
+            float litStart = da > 0.0 ? E : max(E, tLit);
+            float litEnd   = da > 0.0 ? min(X, tLit) : X;
+            float chordLit = max(litEnd - litStart, 0.0);
+            if (chordLit <= 0.0) discard;
+            gl_FragColor = vec4(1.0, 1.0, 1.0, uOpacity * clamp(chordLit / uDist, 0.0, 1.0));
+          }`,
       })
     );
     beamGlow.userData.len = beamLen;
@@ -1617,7 +1743,7 @@ function updateBeamGlow() {
   
   if (beamGlow) {
     beamGlow.visible = flashBeam && flashlightMode;
-    beamGlow.material.opacity = (beamGlowLevel / 100) * 0.9;   // BEAM GLOW setting (must read over bright passthrough)
+    beamGlow.material.uniforms.uOpacity.value = (beamGlowLevel / 100) * 0.9;   // BEAM GLOW setting (must read over bright passthrough)
   }
 }
 
@@ -1925,7 +2051,7 @@ function createSettingsPanel() {
 
   settingsCanvas = document.createElement('canvas');
   settingsCanvas.width = 512;
-  settingsCanvas.height = 700;
+  settingsCanvas.height = 758;
   settingsCtx = settingsCanvas.getContext('2d');
   settingsTex = new THREE.CanvasTexture(settingsCanvas);
 
@@ -1935,7 +2061,7 @@ function createSettingsPanel() {
     depthTest: false,
     depthWrite: false
   });
-  settingsPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.956), mat);
+  settingsPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 1.036), mat);
   settingsPanel.renderOrder = 3000;
   settingsPanel.position.set(0, -0.28, -1.1);   // slightly below view center, ~1m ahead
   settingsPanel.visible = false;
@@ -1947,7 +2073,7 @@ function createSettingsPanel() {
 function updateSettingsPanel() {
   if (!settingsCtx) return;
   const ctx = settingsCtx;
-  const W = 512, H = 700;
+  const W = 512, H = 758;
 
   ctx.clearRect(0, 0, W, H);
   // Card background
@@ -1970,7 +2096,8 @@ function updateSettingsPanel() {
     { text: 'BEAM GLOW: ' + beamGlowLevel + '%', y: 466 },
     { text: 'FLASH OVER: ' + flashOver + '%', y: 524 },
     { text: 'LIGHT BLUR: ' + lightBlur, y: 582 },
-    { text: 'BLUR DYNAMIC ONLY: ' + (blurDynOnly ? 'ON' : 'OFF'), y: 640 }
+    { text: 'BLUR DYNAMIC ONLY: ' + (blurDynOnly ? 'ON' : 'OFF'), y: 640 },
+    { text: saveScanStatus || 'SAVE SCAN', y: 698, fit: true }
   ];
   ctx.textBaseline = 'middle';
   for (let i = 0; i < rows.length; i++) {
@@ -1986,6 +2113,10 @@ function updateSettingsPanel() {
     }
     ctx.fillStyle = settingsCursor === i ? '#fff' : 'rgba(255, 255, 255, 0.85)';
     ctx.font = '600 30px monospace';
+    if (r.fit) {   // status text can be long (filename / error): shrink to fit the row
+      const w = ctx.measureText(r.text).width;
+      if (w > W - 64) ctx.font = '600 ' + Math.max(12, Math.floor(30 * (W - 64) / w)) + 'px monospace';
+    }
     ctx.textAlign = 'center';
     ctx.fillText(r.text, W / 2, r.y);
   }

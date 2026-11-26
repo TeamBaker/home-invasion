@@ -1,7 +1,7 @@
 // Shared procedural-noise + painting library used by every texture recipe.
 // Everything here tiles seamlessly: noise is periodic over the [0,1) tile and
 // canvas brushwork is drawn at every wrap offset.
-import { makeRng, TAU } from './util.js';
+import { makeRng, TAU } from '#util';
 
 const TS = 256, TM = 255;
 const TAB = new Float32Array(TS * TS);
