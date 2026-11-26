@@ -113,7 +113,7 @@ export function classifyPlanes(recs) {
   }
   const floorY = floors.length ? floors.reduce((s, r) => s + r.y, 0) / floors.length : 0;
 
-  const walls = [], solids = [], openings = [];
+  const walls = [], solids = [];
   for (const r of recs) {
     if (floors.includes(r)) r.kind = 'floor';
     else if (r.orientation === 'horizontal') {
@@ -123,7 +123,6 @@ export function classifyPlanes(recs) {
       let lo = Infinity, hi = -Infinity;
       for (const p of r.pts) { lo = Math.min(lo, p.y); hi = Math.max(hi, p.y); }
       r.kind = !PASSABLE_VERTICAL.has(r.label) && lo < floorY + BAND_HI && hi > floorY + BAND_LO ? 'wall' : 'ignore';
-      if (r.label === 'door' || r.label === 'door frame') openings.push({ pts: r.pts });
     }
     if (r.kind === 'solid') solids.push({ pts: r.pts });
     if (r.kind === 'wall') for (let i = 0, j = r.pts.length - 1; i < r.pts.length; j = i++) {
@@ -134,7 +133,7 @@ export function classifyPlanes(recs) {
   return {
     floorY,
     floors: floors.map((r) => ({ pts: r.pts, y: r.y })),
-    walls, solids, openings,
+    walls, solids,
     counts: { total: recs.length, floor: count('floor'), wall: count('wall'), furniture: count('solid'), ignored: count('ignore') },
   };
 }
@@ -172,7 +171,7 @@ export class RoomModel {
   /** hooks: { planeAdded(rec), planeRemoved(rec) } — for visualization. */
   constructor(hooks = {}) {
     this.hooks = hooks;
-    this.nav = new NavGrid({ cell: 0.15, radius: 0.18 });
+    this.nav = new NavGrid({ cell: 0.15, radius: 0.25 });
     this.planes = new Map();   // XRPlane → record
     this.meshes = new Map();   // XRMesh → record
     this.reset();
@@ -294,7 +293,7 @@ export class RoomModel {
       if (!m.points || m.floorY !== c.floorY) { m.points = sampleMesh(m, c.floorY, this.nav.cell); m.floorY = c.floorY; }
       for (let i = 0; i < m.points.length; i++) pts.push(m.points[i]);
     }
-    this.nav.build({ floors: c.floors, walls: c.walls, solids: c.solids, openings: c.openings, points: pts.length ? Float32Array.from(pts) : null }, player);
+    this.nav.build({ floors: c.floors, walls: c.walls, solids: c.solids, points: pts.length ? Float32Array.from(pts) : null }, player);
     this.hooks.rebuilt?.(recs);
   }
 

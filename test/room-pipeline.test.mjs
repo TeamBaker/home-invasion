@@ -147,39 +147,3 @@ test('mesh: knee-to-head band only, runtime errors disable meshes', () => {
   m.ingest(frame, refSpace);   // no throw, planes still flow
   assert.equal(m.planes.size, 10);
 });
-
-test('wall spanning the doorway (single plane) is carved open by the door frame plane', () => {
-  const descs = [
-    horizPlane('floor', 0, -3, -3, 3, 3),
-    horizPlane('ceiling', 2.5, -3, -3, 3, 3, true),
-    vertPlane('wall', -3, -3, 3, -3),
-    vertPlane('wall', 3, -3, 3, 3),
-    vertPlane('wall', 3, 3, -3, 3),
-    vertPlane('wall', -3, 3, -3, -3),
-    vertPlane('wall', -3, 0, 3, 0),            // ONE partition plane, strokes across the doorway
-    vertPlane('door frame', 1.0, 0, 2.0, 0, 0, 2.1),
-    horizPlane('table', 0.74, -2, -2, -1, -1.2),
-  ];
-  const nav = build(descs).nav;
-  assert.ok(nav.ok);
-  assert.equal(nav.passable(1.5, 0, true), true, 'doorway raw cell cleared by the carve');
-  assert.equal(nav.passable(1.5, 0), true, 'doorway centre walkable (inflated)');
-  assert.equal(nav.passable(-1.5, 0, true), false, 'partition still blocks left of the doorway');
-  assert.equal(nav.passable(2.6, 0, true), false, 'partition still blocks right of the doorway');
-
-  const P = { x: -1.5, z: -0.8 }, M = { x: -1.5, z: 1.5 };
-  nav.setTarget(P.x, P.z);
-  assert.ok(Number.isFinite(nav.pathLength(M.x, M.z)), 'reachable');
-  let x = M.x, z = M.z, crossedAt = null, steps = 0;
-  for (; steps < 2000 && Math.hypot(P.x - x, P.z - z) > 0.4; steps++) {
-    const wp = nav.steer(x, z, P.x, P.z);
-    assert.notEqual(wp.mode, 'blocked');
-    const dx = wp.x - x, dz = wp.z - z, l = Math.hypot(dx, dz) || 1;
-    const [nx, nz] = nav.move(x, z, dx / l * 0.03, dz / l * 0.03);
-    assert.ok(nav.passable(nx, nz, true), `never inside an obstacle (${nx.toFixed(2)},${nz.toFixed(2)})`);
-    if (z > 0 && nz <= 0) crossedAt = (x + nx) / 2;
-    x = nx; z = nz;
-  }
-  assert.ok(steps < 2000, 'monster reached the player');
-  assert.ok(crossedAt !== null && crossedAt > 1.0 && crossedAt < 2.0, `crossed z=0 through the doorway (x=${crossedAt})`);
-});
