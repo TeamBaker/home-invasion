@@ -15,6 +15,7 @@
 import * as THREE from 'three';
 import { RoomSense } from './room.js';
 import { FLASH, shadowFov, receiverShaders } from './flashlight.js';
+import { serializeScan } from './scandump.js';
 
 // ───────────────────────────── config ─────────────────────────────
 const CFG = {
@@ -578,7 +579,7 @@ addEventListener('keydown', (e) => {
   // While the panel is open, arrows/Enter drive the panel instead of the game.
   if (settingsPanelOpen) {
     if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
-      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 10);
+      settingsCursor = clamp(settingsCursor + (e.code === 'ArrowUp' ? -1 : 1), 0, 11);
       updateSettingsPanel();
       return;
     }
@@ -632,7 +633,7 @@ addEventListener('keydown', (e) => {
       } else if (settingsCursor === 10) {
         blurDynOnly = !blurDynOnly;
         localStorage.setItem('mrh-blur-dyn', blurDynOnly ? '1' : '0');
-      }
+      } else if (settingsCursor === 11) saveScan();
       updateSettingsPanel();
       return;
     }
@@ -716,6 +717,36 @@ let turnSuppressed = false;
 let settingsBtnWasDown = false;
 let settingsStickWasZero = true;
 let settingsTriggerWasDown = false;
+let saveScanStatus = '';       // SAVE SCAN row feedback ('' = normal label)
+let saveScanBusy = false;
+let saveScanTimer = 0;
+
+// SAVE SCAN: serialize what Quest reported (room.model) and POST it to <origin>/upload (server.py).
+async function saveScan() {
+  if (saveScanBusy) return;
+  saveScanBusy = true;
+  clearTimeout(saveScanTimer);
+  saveScanStatus = 'SAVING...';
+  updateSettingsPanel();
+  try {
+    const payload = serializeScan(room.model, { source: room.source, userAgent: navigator.userAgent });
+    const res = await fetch('/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    let info = null;
+    try { info = await res.json(); } catch (_) { /* non-JSON reply (e.g. plain http.server 501) */ }
+    if (!res.ok || !info || !info.ok) throw new Error((info && info.error) || ('HTTP ' + res.status));
+    saveScanStatus = 'SAVED ' + info.file;
+  } catch (err) {
+    console.warn('save scan failed:', err);
+    saveScanStatus = 'UPLOAD FAILED: ' + String((err && err.message) || err).slice(0, 40);
+  }
+  saveScanBusy = false;
+  updateSettingsPanel();
+  saveScanTimer = setTimeout(() => { saveScanStatus = ''; updateSettingsPanel(); }, 4000);
+}
 
 
 // Desktop mouse look (pointer lock).
@@ -767,7 +798,7 @@ function readInput() {
           } else if (settingsCursor === 10) {
             blurDynOnly = !blurDynOnly;
             localStorage.setItem('mrh-blur-dyn', blurDynOnly ? '1' : '0');
-          }
+          } else if (settingsCursor === 11) saveScan();
           updateSettingsPanel();
         }
         settingsTriggerWasDown = triggerDown;
@@ -780,7 +811,7 @@ function readInput() {
 
           if (stickMoved && settingsStickWasZero) {
             if (Math.abs(stickY) > Math.abs(stickX)) {
-              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(10, settingsCursor + 1);
+              settingsCursor = stickY < 0 ? Math.max(0, settingsCursor - 1) : Math.min(11, settingsCursor + 1);
               updateSettingsPanel();
             } else if (settingsCursor === 1) {
               roomBrightness = Math.max(0, Math.min(100, roomBrightness + (stickX > 0 ? 1 : -1)));
@@ -2017,7 +2048,7 @@ function createSettingsPanel() {
 
   settingsCanvas = document.createElement('canvas');
   settingsCanvas.width = 512;
-  settingsCanvas.height = 700;
+  settingsCanvas.height = 758;
   settingsCtx = settingsCanvas.getContext('2d');
   settingsTex = new THREE.CanvasTexture(settingsCanvas);
 
@@ -2027,7 +2058,7 @@ function createSettingsPanel() {
     depthTest: false,
     depthWrite: false
   });
-  settingsPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.956), mat);
+  settingsPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 1.036), mat);
   settingsPanel.renderOrder = 3000;
   settingsPanel.position.set(0, -0.28, -1.1);   // slightly below view center, ~1m ahead
   settingsPanel.visible = false;
@@ -2039,7 +2070,7 @@ function createSettingsPanel() {
 function updateSettingsPanel() {
   if (!settingsCtx) return;
   const ctx = settingsCtx;
-  const W = 512, H = 700;
+  const W = 512, H = 758;
 
   ctx.clearRect(0, 0, W, H);
   // Card background
@@ -2062,7 +2093,8 @@ function updateSettingsPanel() {
     { text: 'BEAM GLOW: ' + beamGlowLevel + '%', y: 466 },
     { text: 'FLASH OVER: ' + flashOver + '%', y: 524 },
     { text: 'LIGHT BLUR: ' + lightBlur, y: 582 },
-    { text: 'BLUR DYNAMIC ONLY: ' + (blurDynOnly ? 'ON' : 'OFF'), y: 640 }
+    { text: 'BLUR DYNAMIC ONLY: ' + (blurDynOnly ? 'ON' : 'OFF'), y: 640 },
+    { text: saveScanStatus || 'SAVE SCAN', y: 698, fit: true }
   ];
   ctx.textBaseline = 'middle';
   for (let i = 0; i < rows.length; i++) {
@@ -2078,6 +2110,10 @@ function updateSettingsPanel() {
     }
     ctx.fillStyle = settingsCursor === i ? '#fff' : 'rgba(255, 255, 255, 0.85)';
     ctx.font = '600 30px monospace';
+    if (r.fit) {   // status text can be long (filename / error): shrink to fit the row
+      const w = ctx.measureText(r.text).width;
+      if (w > W - 64) ctx.font = '600 ' + Math.max(12, Math.floor(30 * (W - 64) / w)) + 'px monospace';
+    }
     ctx.textAlign = 'center';
     ctx.fillText(r.text, W / 2, r.y);
   }

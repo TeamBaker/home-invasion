@@ -5,6 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RoomModel, framePlanes, inDoor, meshIndicesOutsideDoors } from '../js/roommodel.js';
 import { fakeFrame, horizPlane, vertPlane } from '../js/simroom.js';
+import { serializeScan } from '../js/scandump.js';
 
 // Two rooms split by a partition wall at z=0 with a gap between wall segments at x in [1.0, 2.0]; a table in room A.
 //   room A: z < 0 (player)      room B: z > 0 (monster)
@@ -259,4 +260,38 @@ test('doorways are empty space: walls, frame, door slab and mesh never block or 
   assert.equal(meshIndicesOutsideDoors(couch.vertices, couch.indices, I, m.doorZones, 0), null, 'couch untouched');
   const kept = meshIndicesOutsideDoors(slab.vertices, slab.indices, I, m.doorZones, 0);
   assert.ok(kept && kept.length === 0, 'propped-open door slab removed from the depth mask');
+});
+
+test('scan dump: planes + meshes serialize to JSON with rounding and a mesh size cap', () => {
+  const { frame, refSpace } = fakeFrame(scene());
+  const I = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  const ms = { id: 'mesh-space' };
+  const getPose = frame.getPose;
+  frame.getPose = (s, r) => (s === ms ? { transform: { matrix: I } } : getPose(s, r));
+  const tri = (label) => ({ meshSpace: ms, vertices: new Float32Array([0.123456, 0, 0, 1, 0, 0, 0, 1, 0]),
+    indices: new Uint32Array([0, 1, 2]), semanticLabel: label, lastChangedTime: 1 });
+  frame.detectedMeshes = new Set([tri('couch'), tri('door frame')]);
+  const m = new RoomModel();
+  m.ingest(frame, refSpace); m.rebuild();
+
+  const now = new Date('2026-11-25T12:00:00Z');
+  const d = JSON.parse(JSON.stringify(serializeScan(m, { now, source: 'xr', meshValueCap: 12 })));
+  assert.equal(d.meta.timestamp, '2026-11-25T12:00:00.000Z');
+  assert.equal(d.meta.planeCount, m.planes.size);
+  assert.equal(d.meta.meshCount, 2);
+  assert.equal(d.meta.floorY, 0);
+  assert.equal(d.planes.length, m.planes.size);
+  const floor = d.planes.find((p) => p.label === 'floor');
+  assert.equal(floor.orientation, 'horizontal');
+  assert.equal(floor.matrix.length, 16);
+  assert.equal(floor.polygon.length, 4);
+  assert.ok(floor.points.every((p) => p.y === 0));
+  assert.deepEqual(d.meshes.map((x) => x.label), ['couch', 'door frame']);
+  assert.equal(d.meshes[0].vertices[0], 0.123, 'vertices rounded to mm');
+  assert.deepEqual(d.meshes[0].indices, [0, 1, 2]);
+  assert.equal(d.meshes[0].truncated, false);
+  assert.equal(d.meshes[1].truncated, true, 'second mesh exceeds the cap');
+  assert.equal(d.meshes[1].vertices, null);
+  assert.equal(d.meshes[1].vertexCount, 3);
+  assert.equal(d.meta.meshesTruncated, 1);
 });
