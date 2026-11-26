@@ -1024,7 +1024,7 @@ function updateMonster(dt) {
 
   // Progress check: if the walking distance to you isn't shrinking, it's stuck.
   const expected = speed * dt;
-  stuckTime = (nav.targetIsPlayer && (wp.mode === 'blocked' || moved < expected * 0.25)) ? stuckTime + dt : Math.max(0, stuckTime - dt * 2);
+  stuckTime = (wp.mode === 'blocked' || moved < expected * 0.25) ? stuckTime + dt : Math.max(0, stuckTime - dt * 2);
 
   // Stand on the detected floor and turn to face the direction of travel (in world space).
   _mL.y = room.floorAt(_mL.x, _mL.z);
