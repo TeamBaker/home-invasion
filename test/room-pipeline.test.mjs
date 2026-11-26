@@ -3,7 +3,7 @@
 // classification → NavGrid → BFS. Same code the headset runs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RoomModel, framePlanes } from '../js/roommodel.js';
+import { RoomModel, framePlanes, inDoor, meshIndicesOutsideDoors } from '../js/roommodel.js';
 import { fakeFrame, horizPlane, vertPlane } from '../js/simroom.js';
 
 // Two rooms split by a partition wall at z=0 with a gap between wall segments at x in [1.0, 2.0]; a table in room A.
@@ -197,4 +197,66 @@ test('overhead geometry does not block: an opening under a lintel stays walkable
   }
   assert.ok(steps < 2000, 'monster reached the player');
   assert.ok(crossedAt !== null && crossedAt > 1.0 && crossedAt < 2.0, `crossed z=0 through the opening (x=${crossedAt})`);
+});
+
+// Real Quest layout: each room reports its partition as a FULL rectangle spanning the
+// doorway (room A's at z=0, room B's 12 cm away at z=0.12), plus a 'door frame' plane
+// at x 1.0..2.0, and the global mesh contains the propped-open door slab.
+test('doorways are empty space: walls, frame, door slab and mesh never block or occlude there', () => {
+  const descs = scene().filter((_, i) => i !== 6 && i !== 7);
+  descs.push(vertPlane('wall', -3, 0, 3, 0), vertPlane('wall', 3, 0.12, -3, 0.12));
+  descs.push(vertPlane('door frame', 1.0, 0, 2.0, 0, 0, 2.1));
+  const box = (x0, z0, x1, z1, y0, y1) => {
+    const v = [], idx = [];
+    for (const y of [y0, y1]) for (const [x, z] of [[x0, z0], [x1, z0], [x1, z1], [x0, z1]]) v.push(x, y, z);
+    for (let i = 0; i < 4; i++) { const j = (i + 1) % 4; idx.push(i, j, j + 4, i, j + 4, i + 4); }
+    return { vertices: new Float32Array(v), indices: new Uint32Array(idx) };
+  };
+  const { frame, refSpace } = fakeFrame(descs);
+  const I = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  const ms = { id: 'mesh-space' };
+  const getPose = frame.getPose;
+  frame.getPose = (s, r) => (s === ms ? { transform: { matrix: I } } : getPose(s, r));
+  const slab = box(1.0, -0.9, 1.05, 0, 0.01, 2.0);           // door swung open 90 deg into room A
+  const couch = box(-2, 1, -1, 2, 0, 1);
+  frame.detectedMeshes = new Set([
+    { meshSpace: ms, ...slab, semanticLabel: 'global mesh', lastChangedTime: 1 },
+    { meshSpace: ms, ...box(1.0, -0.05, 2.0, 0.05, 0, 2.1), semanticLabel: 'door frame', lastChangedTime: 1 },
+    { meshSpace: ms, ...couch, semanticLabel: 'couch', lastChangedTime: 1 },
+  ]);
+  const m = new RoomModel();
+  m.ingest(frame, refSpace); m.rebuild({ x: 0, z: -1.5 });
+  const nav = m.nav;
+  assert.equal(m.doorZones.length, 1);
+  assert.equal(m.counts.wall, 6, 'both partition rectangles are still walls');
+
+  // Pathfinding / movement: the doorway is open floor; the walls around it still block.
+  for (const z of [-0.5, 0, 0.06, 0.12, 0.5]) assert.equal(nav.passable(1.5, z, true), true, `doorway free at z=${z}`);
+  assert.equal(nav.passable(-1.5, 0, true), false, 'wall left of the door blocks');
+  assert.equal(nav.passable(2.7, 0.12, true), false, 'wall right of the door blocks');
+  assert.equal(nav.passable(-1, 1.5, true), false, 'couch still blocks');
+  nav.setTarget(-1.5, -0.8);
+  assert.ok(Number.isFinite(nav.pathLength(0, 1.5)), 'monster in room B reaches room A through the door');
+  assert.notEqual(nav.steer(0, 1.5, -1.5, -0.8).mode, 'blocked');
+
+  // Occlusion / camera / flashlight: wall pieces have a hole exactly at the doorway.
+  const walls = [...m.planes.values()].filter((r) => r.kind === 'wall' && r.pieces);
+  assert.equal(walls.length, 2, 'only the two partition walls are cut');
+  const covered = (x, y, z) => walls.some((r) => r.pieces.some((q) => {
+    const xs = q.map((p) => p.x), ys = q.map((p) => p.y), zs = q.map((p) => p.z);
+    return x >= Math.min(...xs) && x <= Math.max(...xs) && y >= Math.min(...ys) && y <= Math.max(...ys)
+      && Math.abs(z - zs[0]) < 1e-3;
+  }));
+  for (const z of [0, 0.12]) {
+    for (const y of [0.05, 1.0, 1.7, 2.1]) assert.equal(covered(1.5, y, z), false, `no wall in the doorway (y=${y}, z=${z})`);
+    assert.equal(covered(1.5, 2.3, z), true, 'lintel above the door still occludes');
+    assert.equal(covered(-1.5, 1.0, z), true, 'wall beside the door still occludes');
+  }
+  assert.ok(inDoor({ x: 1.5, y: 1.6, z: 0.06 }, m.doorZones), 'head in the doorway is inside the zone');
+  assert.ok(!inDoor({ x: -1.5, y: 1.0, z: -1.5 }, m.doorZones));
+
+  // Scene mesh occluders: door slab triangles dropped, couch untouched.
+  assert.equal(meshIndicesOutsideDoors(couch.vertices, couch.indices, I, m.doorZones, 0), null, 'couch untouched');
+  const kept = meshIndicesOutsideDoors(slab.vertices, slab.indices, I, m.doorZones, 0);
+  assert.ok(kept && kept.length === 0, 'propped-open door slab removed from the depth mask');
 });

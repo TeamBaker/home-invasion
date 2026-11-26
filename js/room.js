@@ -5,7 +5,7 @@
 // space. `group` is parented to the dolly so the overlay lines up with passthrough.
 
 import * as THREE from 'three';
-import { RoomModel } from './roommodel.js';
+import { RoomModel, DOOR_LABELS, meshIndicesOutsideDoors } from './roommodel.js';
 import { makeSimFrame } from './simroom.js';
 
 const COLORS = { floor: 0x7a1010, wall: 0x9a9aa0, solid: 0xff7a00, cells: 0xff1a1a, path: 0xffe066 };
@@ -25,6 +25,16 @@ function gridTexture() {
 
 // Writes depth only: invisible itself, hides whatever is behind it. Pushed back slightly
 // so overlay lines / feet touching a surface don't z-fight with it.
+const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+// Wall with its doorways cut out: room-space pieces (roommodel cutDoorways), fan-triangulated.
+function piecesGeo(pieces) {
+  const v = [];
+  for (const q of pieces) for (let i = 1; i + 1 < q.length; i++) for (const p of [q[0], q[i], q[i + 1]]) v.push(p.x, p.y, p.z);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+  return geo;
+}
+
 const OCCLUDER_MAT = new THREE.MeshBasicMaterial({
   colorWrite: false, side: THREE.DoubleSide,
   polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 4,
@@ -185,16 +195,19 @@ export class RoomSense {
   // Geometry is built once per plane/mesh version (lastChangedTime) and cached.
   _updateOccluders() {
     const meshes = this.model.meshes;
-    for (const [rec, occ] of this.meshOcc) if (meshes.get(occ.userData.key) !== rec) {
+    // Doorways: door-labelled meshes never occlude; other meshes lose their doorway triangles.
+    const zones = this.model.doorZones || [], doorSig = JSON.stringify(zones);
+    for (const [rec, occ] of this.meshOcc) if (meshes.get(occ.userData.key) !== rec || occ.userData.doorSig !== doorSig) {
       this._dropOcc(occ); this.meshOcc.delete(rec);
     }
     for (const [key, rec] of meshes) {
-      if (this.meshOcc.has(rec) || !rec.vertices || !rec.indices) continue;
+      if (this.meshOcc.has(rec) || !rec.vertices || !rec.indices || DOOR_LABELS.has(rec.label)) continue;
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(rec.vertices, 3));
-      geo.setIndex(new THREE.BufferAttribute(rec.indices, 1));
+      geo.setIndex(new THREE.BufferAttribute(meshIndicesOutsideDoors(rec.vertices, rec.indices, rec.matrix, zones, this.floorY) || rec.indices, 1));
       const occ = this._addOcc(geo, rec.matrix);
       occ.userData.key = key;
+      occ.userData.doorSig = doorSig;
       occ.userData.sceneMesh = true;   // scene-mesh occluder (furniture cubes etc.)
       this.meshOcc.set(rec, occ);
     }
@@ -202,8 +215,10 @@ export class RoomSense {
     const floorY = this.floorY;
     for (const rec of this.model.planes.values()) {
       const want = usePlanes && (rec.kind === 'wall' || rec.kind === 'solid');
-      if (rec.occ && (!want || rec.occFloor !== floorY)) { this._dropOcc(rec.occ); rec.occ = null; }
+      if (rec.occ && (!want || rec.occFloor !== floorY || rec.occDoor !== doorSig)) { this._dropOcc(rec.occ); rec.occ = null; }
       if (!want || rec.occ) continue;
+      rec.occDoor = doorSig;
+      if (rec.kind === 'wall' && rec.pieces) { rec.occ = this._addOcc(piecesGeo(rec.pieces), IDENTITY); rec.occFloor = floorY; continue; }
       const shape = new THREE.Shape(rec.polygon.map((p) => new THREE.Vector2(p.x, -p.z)));
       const h = rec.y - floorY;
       const geo = rec.kind === 'solid' && h > 0.05
@@ -220,11 +235,13 @@ export class RoomSense {
   // ignores furniture entirely — scene-mesh cubes AND solid planes — so the
   // light passes through it and lands on the wall behind.
   _syncLightOccluders() {
-    const floorY = this.floorY;
+    const floorY = this.floorY, doorSig = JSON.stringify(this.model.doorZones || []);
     for (const rec of this.model.planes.values()) {
       const want = rec.kind === 'wall';
-      if (rec.locc && (!want || rec.loccFloor !== floorY)) { this._dropLightOcc(rec.locc); rec.locc = null; }
+      if (rec.locc && (!want || rec.loccFloor !== floorY || rec.loccDoor !== doorSig)) { this._dropLightOcc(rec.locc); rec.locc = null; }
       if (!want || rec.locc) continue;
+      rec.loccDoor = doorSig;
+      if (rec.pieces) { rec.locc = this._addOcc(piecesGeo(rec.pieces), IDENTITY, this.lightOccGroup); rec.loccFloor = floorY; continue; }
       const shape = new THREE.Shape(rec.polygon.map((p) => new THREE.Vector2(p.x, -p.z)));
       const geo = new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2);
       rec.locc = this._addOcc(geo, rec.matrix, this.lightOccGroup);

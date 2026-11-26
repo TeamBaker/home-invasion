@@ -21,8 +21,11 @@ export const BAND_HI = 1.6;    // vertical planes must reach below this to block
 export const MESH_LO = 0.45;   // scene mesh counts as an obstacle only between knee...
 export const MESH_HI = 1.8;    // ...and head height
 export const CEILING_MIN = 2.0;
-const PASSABLE_VERTICAL = new Set(['door', 'door frame', 'window', 'window frame', 'wall art']);
-const FURNITURE_MESH_SKIP = new Set(['floor', 'ceiling', 'wall', 'door frame', 'window frame', 'door', 'window', 'wall art']);
+export const DOOR_LABELS = new Set(['door', 'door frame', 'doorway', 'opening']);
+const PASSABLE_VERTICAL = new Set([...DOOR_LABELS, 'window', 'window frame', 'wall art']);
+const FURNITURE_MESH_SKIP = new Set([...DOOR_LABELS, 'floor', 'ceiling', 'wall', 'window frame', 'window', 'wall art']);
+export const DOOR_SIDE = 0.1;    // m of jamb/trim either side of a door frame that also counts as doorway
+export const DOOR_TOP = 0.05;    // m above the frame top
 export const REBUILD_INTERVAL = 0.5;   // s — at most this often while the scan keeps changing
 
 // ───────────── frame access (guarded) ─────────────
@@ -97,6 +100,105 @@ export function makePlaneRecord(orientation, label, polygon, matrix) {
   return { orientation, facing, label: (label || '').toLowerCase(), polygon: poly, matrix: m, pts, y: m[13], kind: 'ignore' };
 }
 
+// ------------- doorways -------------
+// Quest reports a door as a 'door frame' plane lying ON a full-rectangle wall plane:
+// the wall polygon spans the opening. A doorway zone is the box around each door
+// plane: its width (+DOOR_SIDE), floor..top (+DOOR_TOP), and +/- one door width
+// across the wall (covers the other room's wall, the frame and the swung-open door).
+// Everything inside it is cut out of walls, scene mesh, occluders and nav.
+// Zone = list of half-spaces {x,y,z,d}: inside iff x*p.x + y*p.y + z*p.z <= d.
+export function doorZones(recs) {
+  const zones = [];
+  for (const r of recs) {
+    if (!DOOR_LABELS.has(r.label) || r.facing !== 'side' || r.pts.length < 3) continue;
+    let nx = r.matrix[4], nz = r.matrix[6];
+    const nl = Math.hypot(nx, nz);
+    if (nl < 1e-6) continue;
+    nx /= nl; nz /= nl;
+    const lx = -nz, lz = nx;                       // along the wall
+    let a = Infinity, b = -Infinity, top = -Infinity, n0 = 0;
+    for (const p of r.pts) {
+      const l = p.x * lx + p.z * lz;
+      a = Math.min(a, l); b = Math.max(b, l); top = Math.max(top, p.y); n0 += (p.x * nx + p.z * nz) / r.pts.length;
+    }
+    const depth = Math.max(0.5, b - a) + 0.1;
+    zones.push([
+      { x: lx, y: 0, z: lz, d: b + DOOR_SIDE },
+      { x: -lx, y: 0, z: -lz, d: -(a - DOOR_SIDE) },
+      { x: nx, y: 0, z: nz, d: n0 + depth },
+      { x: -nx, y: 0, z: -nz, d: -(n0 - depth) },
+      { x: 0, y: 1, z: 0, d: top + DOOR_TOP },
+    ]);
+  }
+  return zones;
+}
+
+const hsVal = (h, p) => h.x * p.x + h.y * p.y + h.z * p.z - h.d;
+export const inDoor = (p, zones) => zones.some((z) => z.every((h) => hsVal(h, p) <= 0));
+/** XZ-only test (nav points carry no height; they are already inside the body band). */
+export const inDoorXZ = (x, z, zones) => zones.some((zn) => zn.every((h) => h.y !== 0 || hsVal(h, { x, y: 0, z }) <= 0));
+
+function clipPoly(poly, h) {
+  const out = [];
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i], q = poly[(i + 1) % poly.length];
+    const vp = hsVal(h, p), vq = hsVal(h, q);
+    if (vp <= 0) out.push(p);
+    if ((vp < 0 && vq > 0) || (vp > 0 && vq < 0)) {
+      const t = vp / (vp - vq);
+      out.push({ x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t, z: p.z + (q.z - p.z) * t });
+    }
+  }
+  return out;
+}
+function area3(poly) {
+  let x = 0, y = 0, z = 0;
+  for (let i = 1; i + 1 < poly.length; i++) {
+    const a = poly[0], b = poly[i], c = poly[i + 1];
+    const ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z, vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+    x += uy * vz - uz * vy; y += uz * vx - ux * vz; z += ux * vy - uy * vx;
+  }
+  return Math.hypot(x, y, z) / 2;
+}
+const solid = (poly) => poly.length >= 3 && area3(poly) > 1e-4;
+
+/** Room-space polygon minus every doorway zone, as convex-ish pieces. null = untouched. */
+export function cutDoorways(pts, zones) {
+  let pieces = [pts], cut = false;
+  for (const zone of zones) {
+    const next = [];
+    for (const piece of pieces) {
+      let inside = piece;
+      for (const h of zone) { inside = clipPoly(inside, h); if (!solid(inside)) break; }
+      if (!solid(inside)) { next.push(piece); continue; }
+      cut = true;
+      let rest = piece;
+      for (const h of zone) {
+        const outside = clipPoly(rest, { x: -h.x, y: -h.y, z: -h.z, d: -h.d });
+        if (solid(outside)) next.push(outside);
+        rest = clipPoly(rest, h);
+        if (!solid(rest)) break;
+      }
+    }
+    pieces = next;
+  }
+  return cut ? pieces : null;
+}
+
+/** Scene-mesh index buffer without triangles touching a doorway (floor-level ones kept so the beam still lands). null = untouched. */
+export function meshIndicesOutsideDoors(vertices, indices, matrix, zones, floorY) {
+  if (!zones.length || !vertices || !indices) return null;
+  const keep = [];
+  const P = (i) => xform(matrix, vertices[i * 3], vertices[i * 3 + 1], vertices[i * 3 + 2]);
+  for (let t = 0; t + 2 < indices.length; t += 3) {
+    const a = P(indices[t]), b = P(indices[t + 1]), c = P(indices[t + 2]);
+    const mid = { x: (a.x + b.x + c.x) / 3, y: (a.y + b.y + c.y) / 3, z: (a.z + b.z + c.z) / 3 };
+    const door = Math.max(a.y, b.y, c.y) > floorY + BAND_LO && (inDoor(a, zones) || inDoor(b, zones) || inDoor(c, zones) || inDoor(mid, zones));
+    if (!door) keep.push(indices[t], indices[t + 1], indices[t + 2]);
+  }
+  return keep.length === indices.length ? null : Uint32Array.from(keep);
+}
+
 /**
  * Classify plane records in place (rec.kind = floor | wall | solid | ignore).
  * Returns the nav-grid input plus counts.
@@ -113,8 +215,10 @@ export function classifyPlanes(recs) {
   }
   const floorY = floors.length ? floors.reduce((s, r) => s + r.y, 0) / floors.length : 0;
 
+  const zones = doorZones(recs);
   const walls = [], solids = [];
   for (const r of recs) {
+    r.pieces = null;
     if (floors.includes(r)) r.kind = 'floor';
     else if (r.orientation === 'horizontal') {
       const h = r.y - floorY;
@@ -128,16 +232,18 @@ export function classifyPlanes(recs) {
     // Per-edge height filter. The plane itself already reaches into the blocking band,
     // so any edge that comes down below head height (bottom edges at the floor, jambs)
     // bounds that surface and blocks; edges entirely overhead (lintels, top edges) do not.
-    if (r.kind === 'wall') for (let i = 0, j = r.pts.length - 1; i < r.pts.length; j = i++) {
-      const eLo = Math.min(r.pts[j].y, r.pts[i].y);
-      if (eLo < floorY + BAND_HI) walls.push([r.pts[j].x, r.pts[j].z, r.pts[i].x, r.pts[i].z]);
+    // Doorways are cut out of the wall first (r.pieces, also used for occluders).
+    if (r.kind === 'wall') r.pieces = cutDoorways(r.pts, zones);
+    if (r.kind === 'wall') for (const q of r.pieces || [r.pts]) for (let i = 0, j = q.length - 1; i < q.length; j = i++) {
+      const eLo = Math.min(q[j].y, q[i].y);
+      if (eLo < floorY + BAND_HI) walls.push([q[j].x, q[j].z, q[i].x, q[i].z]);
     }
   }
   const count = (k) => recs.filter((r) => r.kind === k).length;
   return {
     floorY,
     floors: floors.map((r) => ({ pts: r.pts, y: r.y })),
-    walls, solids,
+    walls, solids, doorZones: zones,
     counts: { total: recs.length, floor: count('floor'), wall: count('wall'), furniture: count('solid'), ignored: count('ignore') },
   };
 }
@@ -188,6 +294,7 @@ export class RoomModel {
     this.nav.ok = false;
     this.floorY = 0;
     this.floors = [];
+    this.doorZones = [];
     this.dirty = false;
     this.sinceBuild = REBUILD_INTERVAL;    // first scan builds immediately
     this.counts = { total: 0, floor: 0, wall: 0, furniture: 0, ignored: 0 };
@@ -290,12 +397,15 @@ export class RoomModel {
     this.floorY = c.floorY;
     this.floors = c.floors;
     this.counts = c.counts;
+    this.doorZones = c.doorZones;
 
     const pts = [];
     for (const m of this.meshes.values()) {
       if (FURNITURE_MESH_SKIP.has(m.label)) continue;
       if (!m.points || m.floorY !== c.floorY) { m.points = sampleMesh(m, c.floorY, this.nav.cell); m.floorY = c.floorY; }
-      for (let i = 0; i < m.points.length; i++) pts.push(m.points[i]);
+      for (let i = 0; i + 1 < m.points.length; i += 2) {
+        if (!inDoorXZ(m.points[i], m.points[i + 1], c.doorZones)) pts.push(m.points[i], m.points[i + 1]);
+      }
     }
     this.nav.build({ floors: c.floors, walls: c.walls, solids: c.solids, points: pts.length ? Float32Array.from(pts) : null }, player);
     this.hooks.rebuilt?.(recs);
