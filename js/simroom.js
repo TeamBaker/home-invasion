@@ -2,7 +2,8 @@
 // It fabricates an XRFrame-shaped object (detectedPlanes + getPose) so the simulated
 // room goes through exactly the same ingestion path as a real Quest frame.
 //
-// 7x7 m room, a full partition wall at z=0.9 (x -3.5..3.5), a couch and a table.
+// 7x7 m room, a partition wall at z=0.9 with an open span at x 2.2..3.5 (no plane in
+// the span), a couch and a table.
 
 const H = 2.4;
 
@@ -67,7 +68,7 @@ export function simRoomDescs() {
     vertPlane('wall', 3.5, -3.5, 3.5, 3.5),
     vertPlane('wall', 3.5, 3.5, -3.5, 3.5),
     vertPlane('wall', -3.5, 3.5, -3.5, -3.5),
-    vertPlane('wall', -3.5, 0.9, 3.5, 0.9),            // full partition, no gap
+    vertPlane('wall', -3.5, 0.9, 2.2, 0.9),            // partition; open span at x 2.2..3.5
     horizPlane('couch', 0.45, -2.6, -3.1, -0.6, -2.2),
     horizPlane('table', 0.75, 0.9, -1.6, 1.9, -0.8),
   ];

@@ -7,7 +7,7 @@
 //     plane.planeSpace      XRSpace — +Y of this space is the plane normal
 //     plane.polygon         DOMPointReadOnly[] in planeSpace (y ≈ 0)
 //     plane.orientation     'horizontal' | 'vertical' (may be undefined)
-//     plane.semanticLabel   'floor' | 'wall' | 'ceiling' | 'table' | 'couch' | ...
+//     plane.semanticLabel   'floor' | 'wall' | 'ceiling' | 'table' | 'couch' | 'door frame' | ...
 //     plane.lastChangedTime DOMHighResTimeStamp
 //   frame.detectedMeshes : XRMeshSet of XRMesh {meshSpace, vertices, indices, semanticLabel, lastChangedTime}
 //   frame.getPose(space, refSpace).transform.matrix : Float32Array(16), column-major
@@ -21,8 +21,8 @@ export const BAND_HI = 1.6;    // vertical planes must reach below this to block
 export const MESH_LO = 0.45;   // scene mesh counts as an obstacle only between knee...
 export const MESH_HI = 1.8;    // ...and head height
 export const CEILING_MIN = 2.0;
-const PASSABLE_VERTICAL = new Set(['window', 'window frame', 'wall art']);
-const FURNITURE_MESH_SKIP = new Set(['floor', 'ceiling', 'wall', 'window frame', 'window', 'wall art']);
+const PASSABLE_VERTICAL = new Set(['door', 'door frame', 'window', 'window frame', 'wall art']);
+const FURNITURE_MESH_SKIP = new Set(['floor', 'ceiling', 'wall', 'door frame', 'window frame', 'door', 'window', 'wall art']);
 export const REBUILD_INTERVAL = 0.5;   // s — at most this often while the scan keeps changing
 
 // ───────────── frame access (guarded) ─────────────
@@ -125,8 +125,12 @@ export function classifyPlanes(recs) {
       r.kind = !PASSABLE_VERTICAL.has(r.label) && lo < floorY + BAND_HI && hi > floorY + BAND_LO ? 'wall' : 'ignore';
     }
     if (r.kind === 'solid') solids.push({ pts: r.pts });
+    // Per-edge height filter. The plane itself already reaches into the blocking band,
+    // so any edge that comes down below head height (bottom edges at the floor, jambs)
+    // bounds that surface and blocks; edges entirely overhead (lintels, top edges) do not.
     if (r.kind === 'wall') for (let i = 0, j = r.pts.length - 1; i < r.pts.length; j = i++) {
-      walls.push([r.pts[j].x, r.pts[j].z, r.pts[i].x, r.pts[i].z]);
+      const eLo = Math.min(r.pts[j].y, r.pts[i].y);
+      if (eLo < floorY + BAND_HI) walls.push([r.pts[j].x, r.pts[j].z, r.pts[i].x, r.pts[i].z]);
     }
   }
   const count = (k) => recs.filter((r) => r.kind === k).length;

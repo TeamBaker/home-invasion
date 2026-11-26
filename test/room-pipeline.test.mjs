@@ -158,3 +158,43 @@ test('lost player in unmapped space keeps the last target instead of dying', () 
   assert.ok(reachable(), 'unmapped player -> field kept');
   assert.equal(nav.targetCell, want);
 });
+
+// Vertical plane along +X from (ax, z) to (bx, z) whose polygon is given as (x, h)
+// pairs in world terms. Same basis and sign handling as simroom vertPlane: local Z
+// is X x Y, so world h = cy + s * localZ with s = sign(Z.y).
+function vertPolyPlane(label, ax, bx, z, y0, y1, outline) {
+  const X = [1, 0, 0], Y = [0, 0, 1];
+  const Z = [X[1] * Y[2] - X[2] * Y[1], X[2] * Y[0] - X[0] * Y[2], X[0] * Y[1] - X[1] * Y[0]];
+  const cx = (ax + bx) / 2, cy = (y0 + y1) / 2, s = Math.sign(Z[1]);
+  const matrix = new Float32Array([...X, 0, ...Y, 0, ...Z, 0, cx, cy, z, 1]);
+  return { label, orientation: 'vertical', matrix, polygon: outline.map(([x, h]) => ({ x: x - cx, y: 0, z: (h - cy) * s, w: 1 })) };
+}
+
+test('overhead geometry does not block: an opening under a lintel stays walkable', () => {
+  const descs = scene().filter((_, i) => i !== 6 && i !== 7);   // drop the two partition segments
+  descs.push(vertPolyPlane('wall', -3, 3, 0, 0, 2.4, [
+    [-3, 0], [1.0, 0], [1.0, 2.1], [2.0, 2.1], [2.0, 0], [3, 0], [3, 2.4], [-3, 2.4],
+  ]));
+  const m = build(descs);
+  const nav = m.nav;
+  assert.equal(m.counts.wall, 5);
+  assert.equal(nav.passable(1.5, 0, true), true, 'opening under the lintel is walkable');
+  assert.equal(nav.passable(-1.5, 0, true), false, 'solid wall left of the opening blocks');
+  assert.equal(nav.passable(2.6, 0, true), false, 'solid wall right of the opening blocks');
+
+  const P = { x: -1.5, z: -0.8 }, M = { x: -1.5, z: 1.5 };
+  nav.setTarget(P.x, P.z);
+  assert.ok(Number.isFinite(nav.pathLength(M.x, M.z)), 'reachable');
+  let x = M.x, z = M.z, crossedAt = null, steps = 0;
+  for (; steps < 2000 && Math.hypot(P.x - x, P.z - z) > 0.4; steps++) {
+    const wp = nav.steer(x, z, P.x, P.z);
+    assert.notEqual(wp.mode, 'blocked');
+    const dx = wp.x - x, dz = wp.z - z, l = Math.hypot(dx, dz) || 1;
+    const [nx, nz] = nav.move(x, z, dx / l * 0.03, dz / l * 0.03);
+    assert.ok(nav.passable(nx, nz, true), `never inside an obstacle (${nx.toFixed(2)},${nz.toFixed(2)})`);
+    if (z > 0 && nz <= 0) crossedAt = (x + nx) / 2;
+    x = nx; z = nz;
+  }
+  assert.ok(steps < 2000, 'monster reached the player');
+  assert.ok(crossedAt !== null && crossedAt > 1.0 && crossedAt < 2.0, `crossed z=0 through the opening (x=${crossedAt})`);
+});
