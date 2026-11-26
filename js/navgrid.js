@@ -46,7 +46,7 @@ export class NavGrid {
    * @param focus {x,z} a point that must be inside the grid (the player)
    */
   build(room, focus = { x: 0, z: 0 }) {
-    const { floors = [], walls = [], solids = [], points = null } = room;
+    const { floors = [], walls = [], solids = [], points = null, openings = [] } = room;
     let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
     const grow = (x, z) => {
       if (x < minX) minX = x; if (x > maxX) maxX = x;
@@ -85,6 +85,7 @@ export class NavGrid {
       const k = this.cellOf(points[i], points[i + 1]);
       if (k >= 0) raw[k] = OBSTACLE;
     }
+    this._carveOpenings(openings);
 
     // Inflate by the monster's radius.
     const block = this.block = new Uint8Array(n);
@@ -127,6 +128,35 @@ export class NavGrid {
     for (let i = 0; i <= steps; i++) {
       const k = this.cellOf(ax + (bx - ax) * i / steps, az + (bz - az) * i / steps);
       if (k >= 0) this.raw[k] = OBSTACLE;
+    }
+  }
+  // Door planes: Quest often reports one wall plane spanning the doorway, so its stroke
+  // seals the opening. Clear (to FREE) a rectangle along each door's span, clearR to each
+  // side through the wall. Nothing is cleared past the span ends.
+  _carveOpenings(openings) {
+    if (!openings || !openings.length) return;
+    const c = this.cell, clearR = 2 * this.radius + c;
+    for (const o of openings) {
+      const pts = o && o.pts;
+      if (!pts || pts.length < 2) continue;
+      let A = pts[0], B = pts[1], best = -1;
+      for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
+        const d = (pts[i].x - pts[j].x) ** 2 + (pts[i].z - pts[j].z) ** 2;
+        if (d > best) { best = d; A = pts[i]; B = pts[j]; }
+      }
+      const len = Math.sqrt(best);
+      if (!(len > 1e-6)) continue;
+      const ux = (B.x - A.x) / len, uz = (B.z - A.z) / len;
+      const x0 = Math.min(A.x, B.x) - clearR, x1 = Math.max(A.x, B.x) + clearR;
+      const z0 = Math.min(A.z, B.z) - clearR, z1 = Math.max(A.z, B.z) + clearR;
+      const cx0 = Math.max(0, Math.floor((x0 - this.minX) / c)), cx1 = Math.min(this.w - 1, Math.floor((x1 - this.minX) / c));
+      const cz0 = Math.max(0, Math.floor((z0 - this.minZ) / c)), cz1 = Math.min(this.h - 1, Math.floor((z1 - this.minZ) / c));
+      for (let z = cz0; z <= cz1; z++) for (let x = cx0; x <= cx1; x++) {
+        const px = this.minX + (x + 0.5) * c - A.x, pz = this.minZ + (z + 0.5) * c - A.z;
+        const t = px * ux + pz * uz;
+        if (t < 0 || t > len) continue;
+        if (Math.abs(px * uz - pz * ux) <= clearR) this.raw[z * this.w + x] = FREE;
+      }
     }
   }
   _strokePoly(pts) {

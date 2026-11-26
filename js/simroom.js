@@ -2,8 +2,8 @@
 // It fabricates an XRFrame-shaped object (detectedPlanes + getPose) so the simulated
 // room goes through exactly the same ingestion path as a real Quest frame.
 //
-// 7×7 m room, a partition wall with a doorway (x 2.2..3.5 at z=0.9), a door frame
-// plane in that doorway, a couch and a table.
+// 7x7 m room, a partition wall that spans the doorway (x 2.2..3.5 at z=0.9) as one
+// plane, like Meta's; the door frame plane in that doorway carves it open. A couch and a table.
 
 const H = 2.4;
 
@@ -68,7 +68,7 @@ export function simRoomDescs() {
     vertPlane('wall', 3.5, -3.5, 3.5, 3.5),
     vertPlane('wall', 3.5, 3.5, -3.5, 3.5),
     vertPlane('wall', -3.5, 3.5, -3.5, -3.5),
-    vertPlane('wall', -3.5, 0.9, 2.2, 0.9),            // partition; doorway at x 2.2..3.5
+    vertPlane('wall', -3.5, 0.9, 3.5, 0.9),            // partition spans the doorway now (like Meta's single wall plane)
     vertPlane('door frame', 2.2, 0.9, 3.5, 0.9, 0, 2.1), // the doorway itself — passable
     horizPlane('couch', 0.45, -2.6, -3.1, -0.6, -2.2),
     horizPlane('table', 0.75, 0.9, -1.6, 1.9, -0.8),
