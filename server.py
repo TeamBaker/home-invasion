@@ -17,6 +17,10 @@ SCAN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scans')
 
 
 class Handler(SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Cache-Control', 'no-cache')
+        super().end_headers()
+
     def _reply(self, code, obj):
         body = json.dumps(obj).encode('utf-8')
         self.send_response(code)
