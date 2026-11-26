@@ -1,0 +1,18 @@
+{
+  "name": "home-invasion",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#navgrid": "./js/navgrid.js",
+    "#roommodel": "./js/roommodel.js",
+    "#simroom": "./js/simroom.js",
+    "#room": "./js/room.js",
+    "#flashlight": "./js/flashlight.js",
+    "#scandump": "./js/scandump.js",
+    "#audio": "./js/audio.js",
+    "#input": "./js/input.js",
+    "#noise": "./js/noise.js",
+    "#qmath": "./js/qmath.js",
+    "#util": "./js/util.js"
+  }
+}

@@ -14,7 +14,7 @@
 //
 // Everything here lives in *room space* = the XR reference space.
 
-import { NavGrid } from './navgrid.js';
+import { NavGrid } from '#navgrid';
 
 export const BAND_LO = 0.12;   // horizontal surfaces lower than this above the floor are stepped over (rugs)
 export const BAND_HI = 1.6;    // vertical planes must reach below this to block
@@ -107,10 +107,11 @@ export function makePlaneRecord(orientation, label, polygon, matrix) {
 // across the wall (covers the other room's wall, the frame and the swung-open door).
 // Everything inside it is cut out of walls, scene mesh, occluders and nav.
 // Zone = list of half-spaces {x,y,z,d}: inside iff x*p.x + y*p.y + z*p.z <= d.
-export function doorZones(recs) {
+export function doorZones(recs, floorY = 0) {
   const zones = [];
   for (const r of recs) {
     if (!DOOR_LABELS.has(r.label) || r.facing !== 'side' || r.pts.length < 3) continue;
+    if (Math.min(...r.pts.map((p) => p.y)) > floorY + BAND_HI) continue;   // floating above head height: not a way through
     let nx = r.matrix[4], nz = r.matrix[6];
     const nl = Math.hypot(nx, nz);
     if (nl < 1e-6) continue;
@@ -131,6 +132,14 @@ export function doorZones(recs) {
     ]);
   }
   return zones;
+}
+
+/** XZ footprint polygon of a door zone (its four vertical half-spaces), for the nav grid. */
+export function doorFootprint(zone) {
+  const [l, , n] = zone;                       // along-wall and across-wall half-spaces
+  const a = -zone[1].d, b = l.d, n0 = -zone[3].d, n1 = n.d;
+  const P = (s, t) => ({ x: l.x * s + n.x * t, y: 0, z: l.z * s + n.z * t });
+  return [P(a, n0), P(b, n0), P(b, n1), P(a, n1)];
 }
 
 const hsVal = (h, p) => h.x * p.x + h.y * p.y + h.z * p.z - h.d;
@@ -215,7 +224,7 @@ export function classifyPlanes(recs) {
   }
   const floorY = floors.length ? floors.reduce((s, r) => s + r.y, 0) / floors.length : 0;
 
-  const zones = doorZones(recs);
+  const zones = doorZones(recs, floorY);
   const walls = [], solids = [];
   for (const r of recs) {
     r.pieces = null;
@@ -407,7 +416,8 @@ export class RoomModel {
         if (!inDoorXZ(m.points[i], m.points[i + 1], c.doorZones)) pts.push(m.points[i], m.points[i + 1]);
       }
     }
-    this.nav.build({ floors: c.floors, walls: c.walls, solids: c.solids, points: pts.length ? Float32Array.from(pts) : null }, player);
+    this.nav.build({ floors: c.floors, walls: c.walls, solids: c.solids, points: pts.length ? Float32Array.from(pts) : null,
+      open: c.doorZones.map((z) => ({ pts: doorFootprint(z) })) }, player);
     this.hooks.rebuilt?.(recs);
   }
 

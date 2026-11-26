@@ -5,8 +5,8 @@
 // space. `group` is parented to the dolly so the overlay lines up with passthrough.
 
 import * as THREE from 'three';
-import { RoomModel, DOOR_LABELS, meshIndicesOutsideDoors } from './roommodel.js';
-import { makeSimFrame } from './simroom.js';
+import { RoomModel, DOOR_LABELS, meshIndicesOutsideDoors } from '#roommodel';
+import { makeSimFrame } from '#simroom';
 
 const COLORS = { floor: 0x7a1010, wall: 0x9a9aa0, solid: 0xff7a00, cells: 0xff1a1a, path: 0xffe066 };
 

@@ -10,7 +10,7 @@ const roundArr = (a, k) => Array.from(a, (v) => round(v, k));
 const roundPt = (p, k) => ({ x: round(p.x, k), y: round(p.y || 0, k), z: round(p.z, k) });
 
 /**
- * model: RoomModel. opts: { now: Date, source, userAgent, decimals, meshValueCap }.
+ * model: RoomModel. opts: { now: Date, source, userAgent, build, decimals, meshValueCap }.
  * Meshes are written in iteration order until the value cap is reached; later meshes keep
  * label/pose/counts but get vertices/indices = null and truncated = true.
  */
@@ -57,6 +57,7 @@ export function serializeScan(model, opts = {}) {
       format: 'home-invasion-scan/1',
       timestamp: now.toISOString(),
       source: opts.source ?? null,
+      build: opts.build ?? null,           // ?v= tag of the main.js that actually ran
       userAgent: opts.userAgent ?? null,
       floorY: round(model.floorY || 0, k),
       planeCount: planes.length,

@@ -275,8 +275,9 @@ test('scan dump: planes + meshes serialize to JSON with rounding and a mesh size
   m.ingest(frame, refSpace); m.rebuild();
 
   const now = new Date('2026-11-25T12:00:00Z');
-  const d = JSON.parse(JSON.stringify(serializeScan(m, { now, source: 'xr', meshValueCap: 12 })));
+  const d = JSON.parse(JSON.stringify(serializeScan(m, { now, source: 'xr', build: 'shadow52', meshValueCap: 12 })));
   assert.equal(d.meta.timestamp, '2026-11-25T12:00:00.000Z');
+  assert.equal(d.meta.build, 'shadow52');
   assert.equal(d.meta.planeCount, m.planes.size);
   assert.equal(d.meta.meshCount, 2);
   assert.equal(d.meta.floorY, 0);
@@ -294,4 +295,46 @@ test('scan dump: planes + meshes serialize to JSON with rounding and a mesh size
   assert.equal(d.meshes[1].vertices, null);
   assert.equal(d.meshes[1].vertexCount, 3);
   assert.equal(d.meta.meshesTruncated, 1);
+});
+
+// The user's REAL Quest 3 scan (two rooms, door propped open between them), planes only.
+// Quest's floor polygons stop at each room's walls, so a doorway threshold lies outside
+// every floor polygon (raw=OUTSIDE), and furniture planes reach into it: the doorway sealed
+// even though walls / mesh were cut there. Built exactly as the game does: ingest + rebuild.
+test('real scan: both rooms connect through the doorways', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const fx = JSON.parse(await readFile(new URL('./fixtures/real-house-planes.json', import.meta.url), 'utf8'));
+  const { frame, refSpace } = fakeFrame(fx.planes);
+  const m = new RoomModel();
+  m.ingest(frame, refSpace); m.rebuild({ x: 0, z: 0 });
+  const nav = m.nav;
+  assert.equal(m.counts.floor, 2);
+  assert.equal(m.counts.wall, 20);
+  assert.ok(m.doorZones.length >= 8, `door zones: ${m.doorZones.length}`);
+
+  // Every floor-reaching door is walkable straight through, 0.45 m either side of the plane.
+  const room1 = { x: 0.6, z: -3.7 }, room2 = { x: 9.0, z: -2.6 };   // far corners of the two floor polygons
+  nav.setTarget(room1.x, room1.z);
+  let doors = 0;
+  for (const r of m.planes.values()) {
+    if (!['door', 'door frame'].includes(r.label) || Math.min(...r.pts.map((p) => p.y)) > m.floorY + 1.6) continue;
+    doors++;
+    let nx = r.matrix[4], nz = r.matrix[6]; const l = Math.hypot(nx, nz); nx /= l; nz /= l;
+    const cx = r.pts.reduce((s, p) => s + p.x, 0) / r.pts.length, cz = r.pts.reduce((s, p) => s + p.z, 0) / r.pts.length;
+    for (const t of [-0.45, -0.2, 0, 0.2, 0.45]) {
+      const x = cx + nx * t, z = cz + nz * t;
+      assert.equal(nav.passable(x, z), true, `door at (${cx.toFixed(2)},${cz.toFixed(2)}) blocked at ${t} m`);
+      assert.ok(Number.isFinite(nav.pathLength(x, z)), `door at (${cx.toFixed(2)},${cz.toFixed(2)}) unreachable at ${t} m`);
+    }
+  }
+  assert.equal(doors, 8);
+
+  // The propped-open door between the rooms (wall at room1's south-west corner).
+  assert.equal(nav.passable(-0.10, -4.37), true, 'doorway centre is walkable');
+  assert.equal(nav.passable(-0.25, -4.90), true, 'swung-open door slab spot is walkable');
+
+  const ab = nav.pathLength(room2.x, room2.z);
+  nav.setTarget(room2.x, room2.z);
+  const ba = nav.pathLength(room1.x, room1.z);
+  assert.ok(Number.isFinite(ab) && Number.isFinite(ba), `rooms connect: ${ab} / ${ba}`);
 });

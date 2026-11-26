@@ -13,9 +13,12 @@
 // the room "comes with you" and the monster is re-constrained to wherever it now is.
 
 import * as THREE from 'three';
-import { RoomSense } from './room.js';
-import { FLASH, shadowFov, receiverShaders } from './flashlight.js';
-import { serializeScan } from './scandump.js';
+import { RoomSense } from '#room';
+import { FLASH, shadowFov, receiverShaders } from '#flashlight';
+import { serializeScan } from '#scandump';
+
+// Build tag of the code that is actually running (index.html loads main.js?v=<tag>).
+const BUILD = new URL(import.meta.url).searchParams.get('v') || 'unversioned';
 
 // ───────────────────────────── config ─────────────────────────────
 const CFG = {
@@ -729,7 +732,7 @@ async function saveScan() {
   saveScanStatus = 'SAVING...';
   updateSettingsPanel();
   try {
-    const payload = serializeScan(room.model, { source: room.source, userAgent: navigator.userAgent });
+    const payload = serializeScan(room.model, { source: room.source, userAgent: navigator.userAgent, build: BUILD });
     const res = await fetch('/upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
