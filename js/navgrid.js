@@ -39,6 +39,8 @@ export class NavGrid {
     this.path = [];         // last planned path (array of {x,z}) — for debug drawing
     this.targetCell = -1;
     this.targetVersion = -1;
+    this.targetIsPlayer = false;
+    this.lastTargetCell = -1;   // last valid target cell (fallback when the player is off-grid)
   }
 
   /**
@@ -86,6 +88,7 @@ export class NavGrid {
       if (k >= 0) raw[k] = OBSTACLE;
     }
     this._carveOpenings(openings);
+    this._carveOpenings(this._wallGaps(walls));
 
     // Inflate by the monster's radius.
     const block = this.block = new Uint8Array(n);
@@ -159,6 +162,49 @@ export class NavGrid {
       }
     }
   }
+  // Doorway gaps without a door label: two collinear wall segments (same line within one
+  // cell, directions within 5 deg) whose facing ends are 0.4..2.5 m apart. A gap already
+  // covered by a third collinear segment (a closed doorway) is not an opening.
+  _wallGaps(walls) {
+    const segs = [];
+    for (const w of walls) {
+      const len = Math.hypot(w[2] - w[0], w[3] - w[1]);
+      if (len > 1e-3) segs.push({ ax: w[0], az: w[1], bx: w[2], bz: w[3], ux: (w[2] - w[0]) / len, uz: (w[3] - w[1]) / len, len });
+    }
+    const tol = this.cell, cosTol = Math.cos(5 * Math.PI / 180);
+    const lineD = (s, x, z) => Math.abs((x - s.ax) * s.uz - (z - s.az) * s.ux);
+    const coll = (s, t) => Math.abs(s.ux * t.ux + s.uz * t.uz) >= cosTol &&
+      lineD(s, t.ax, t.az) <= tol && lineD(s, t.bx, t.bz) <= tol &&
+      lineD(t, s.ax, s.az) <= tol && lineD(t, s.bx, s.bz) <= tol;
+    const proj = (s, x, z) => (x - s.ax) * s.ux + (z - s.az) * s.uz;
+    const out = [], seen = new Set();
+    for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) {
+      const s = segs[i], t = segs[j];
+      if (!coll(s, t)) continue;
+      // On s's line: s spans [0, len]; facing ends are s's end and t's nearest end.
+      const t0 = proj(s, t.ax, t.az), t1 = proj(s, t.bx, t.bz);
+      const tA = t0 < t1 ? { v: t0, x: t.ax, z: t.az } : { v: t1, x: t.bx, z: t.bz };
+      const tB = t0 < t1 ? { v: t1, x: t.bx, z: t.bz } : { v: t0, x: t.ax, z: t.az };
+      let g0, g1, P, Q;
+      if (tA.v > s.len) { g0 = s.len; g1 = tA.v; P = { x: s.bx, z: s.bz }; Q = { x: tA.x, z: tA.z }; }
+      else if (tB.v < 0) { g0 = tB.v; g1 = 0; P = { x: tB.x, z: tB.z }; Q = { x: s.ax, z: s.az }; }
+      else continue;                                    // segments overlap or meet
+      const gap = g1 - g0;
+      if (gap < 0.4 || gap > 2.5) continue;
+      let covered = false;
+      for (let m = 0; m < segs.length && !covered; m++) {
+        if (m === i || m === j || !coll(s, segs[m])) continue;
+        const a = proj(s, segs[m].ax, segs[m].az), b = proj(s, segs[m].bx, segs[m].bz);
+        if (Math.min(g1, Math.max(a, b)) - Math.max(g0, Math.min(a, b)) > tol) covered = true;
+      }
+      if (covered) continue;
+      const key = [P, Q].map((p) => Math.round(p.x / tol) + ':' + Math.round(p.z / tol)).sort().join(',');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ pts: [P, Q] });
+    }
+    return out;
+  }
   _strokePoly(pts) {
     for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) this._stroke(pts[j].x, pts[j].z, pts[i].x, pts[i].z);
   }
@@ -213,9 +259,24 @@ export class NavGrid {
   /** BFS outward from the target (player). Cheap to call every frame: only recomputes on change. */
   setTarget(x, z) {
     if (!this.ok) return;
-    let k = this.cellOf(x, z);
-    if (k < 0 || this.block[k]) k = this.nearestFreeCell(x, z, 1.5);
-    if (k === this.targetCell && this.targetVersion === this.version) return;
+    let k = this.cellOf(x, z), isPlayer = false;
+    if (k >= 0 && !this.block[k]) isPlayer = true;
+    else k = this.nearestFreeCell(x, z, 1.5);
+    if (k < 0) {
+      // Player is in unmapped space: keep heading to the last good approach point.
+      const L = this.lastTargetVersion === this.version ? this.lastTargetCell
+        : (this.lastTargetPos ? this.cellOf(this.lastTargetPos.x, this.lastTargetPos.z) : -1);
+      if (L >= 0 && L < this.block.length && !this.block[L]) k = L;
+      else { this.lastTargetCell = -1; this.lastTargetPos = null; }
+    }
+    if (k >= 0) {
+      this.lastTargetCell = k;
+      this.lastTargetVersion = this.version;
+      this.lastTargetPos = { x: this.centerX(k), z: this.centerZ(k) };
+    }
+    if (k === this.targetCell && this.targetVersion === this.version && isPlayer === this.targetIsPlayer) return;
+    this.targetIsPlayer = isPlayer;
+    if (k === this.targetCell && this.targetVersion === this.version) return;   // same field, only the flag changed
     this.targetCell = k;
     this.targetVersion = this.version;
     const { dist, queue, block, w, h } = this;
