@@ -147,3 +147,17 @@ test('mesh: knee-to-head band only, runtime errors disable meshes', () => {
   m.ingest(frame, refSpace);   // no throw, planes still flow
   assert.equal(m.planes.size, 10);
 });
+
+test('lost player in unmapped space keeps the last target instead of dying', () => {
+  const nav = build(scene()).nav;
+  const reachable = () => nav.dist.some((d) => d >= 0);
+  nav.setTarget(0, -1);
+  assert.equal(nav.targetIsPlayer, true);
+  assert.ok(reachable(), 'player on free floor -> reachable set non-empty');
+  const k0 = nav.cellOf(0, -1);
+  const want = nav.cellOf(nav.centerX(k0), nav.centerZ(k0));
+  nav.setTarget(6, 0);
+  assert.equal(nav.targetIsPlayer, false);
+  assert.ok(reachable(), 'unmapped player -> field kept');
+  assert.equal(nav.targetCell, want);
+});

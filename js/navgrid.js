@@ -39,6 +39,10 @@ export class NavGrid {
     this.path = [];         // last planned path (array of {x,z}) — for debug drawing
     this.targetCell = -1;
     this.targetVersion = -1;
+    this.targetIsPlayer = false;
+    this.lastTargetCell = -1;
+    this.lastTargetX = 0;
+    this.lastTargetZ = 0;
   }
 
   /**
@@ -184,8 +188,26 @@ export class NavGrid {
   setTarget(x, z) {
     if (!this.ok) return;
     let k = this.cellOf(x, z);
-    if (k < 0 || this.block[k]) k = this.nearestFreeCell(x, z, 1.5);
-    if (k === this.targetCell && this.targetVersion === this.version) return;
+    let isPlayer = false;
+    if (k >= 0 && !this.block[k]) {
+      isPlayer = true;
+    } else {
+      k = this.nearestFreeCell(x, z, 1.5);
+      if (k < 0 && this.lastTargetCell >= 0) {
+        // Player is in unmapped space: keep chasing the last known target (by position,
+        // since cell indices change when the grid rebuilds). Drop it if now blocked.
+        const lk = this.cellOf(this.lastTargetX, this.lastTargetZ);
+        if (lk >= 0 && !this.block[lk]) k = lk;
+        else this.lastTargetCell = -1;
+      }
+    }
+    if (k >= 0) {
+      this.lastTargetCell = k;
+      this.lastTargetX = this.centerX(k);
+      this.lastTargetZ = this.centerZ(k);
+    }
+    if (k === this.targetCell && this.targetVersion === this.version && isPlayer === this.targetIsPlayer) return;
+    this.targetIsPlayer = isPlayer;
     this.targetCell = k;
     this.targetVersion = this.version;
     const { dist, queue, block, w, h } = this;
