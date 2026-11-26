@@ -390,6 +390,7 @@ class Monster {
     this.root = new THREE.Group();
     this.body = new THREE.Group();
     this.root.add(this.body);
+    this.root.scale.setScalar(0.75);   // shorter guy
 
     const hipY = 1.24;
     this.hips = new THREE.Group();
